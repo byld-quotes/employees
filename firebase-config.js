@@ -1,4 +1,4 @@
-/* BYLD Labour app settings (free Firebase Spark plan).
+/* BYLD Employee app settings (free Firebase Spark plan).
    Firebase project: hr-admin-eb404.
    This is the only file you need to edit. */
 self.BYLD_CONFIG = {
@@ -19,6 +19,8 @@ self.BYLD_CONFIG = {
   admins: ["admin@byld.ae", "accounts@byld.ae", "lcrllenado@gmail.com"],
 
   company: "BYLD Technical Services L.L.C",
-  offDays: [5],          /* 5 = Friday. Days with no attendance expected. */
+  offDays: [6, 0],       /* rest days: 6 = Saturday, 0 = Sunday */
+  workStart: "08:30",    /* office hours, Monday to Friday, 1-hour break */
+  workEnd: "17:30",
   defaultRadius: 300     /* metres from the site before a time-in is flagged */
 };

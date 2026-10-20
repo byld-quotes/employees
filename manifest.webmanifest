@@ -1,6 +1,6 @@
 {
-  "name": "BYLD Labour",
-  "short_name": "BYLD Labour",
+  "name": "BYLD Employees",
+  "short_name": "BYLD Employees",
   "description": "Time in and out, leave, loans, messages and documents for BYLD Technical Services staff.",
   "start_url": "./",
   "scope": "./",
