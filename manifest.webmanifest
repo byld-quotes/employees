@@ -1,0 +1,16 @@
+{
+  "name": "BYLD Labour",
+  "short_name": "BYLD Labour",
+  "description": "Time in and out, leave, loans, messages and documents for BYLD Technical Services staff.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#ECF0EF",
+  "theme_color": "#10373B",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
