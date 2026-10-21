@@ -3,6 +3,7 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/fireba
 import { getAuth, onAuthStateChanged, signInAnonymously, signInWithEmailAndPassword, signOut, sendPasswordResetEmail } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
 import { getFirestore, doc, collection, query, where, orderBy, limit, onSnapshot, setDoc, addDoc, updateDoc, deleteDoc, getDoc, getDocs, serverTimestamp, writeBatch, arrayUnion, Timestamp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
 
+import { LANGS, TEXT } from "./lang.js";
 const CFG = self.BYLD_CONFIG;
 const ADMINS = CFG.admins.map(e => e.toLowerCase());
 const OFF = CFG.offDays || [5];
@@ -12,6 +13,13 @@ const LOGO = document.getElementById("logo-tpl").innerHTML;
 const MARK = document.getElementById("mark-tpl").innerHTML;
 const BELL = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>';
 const DOC_TYPES = ["Salary certificate", "Employment letter", "NOC", "Experience letter", "Payslip", "Copy of my contract", "Other"];
+/* worker screens follow the language chosen on this phone; the office view stays in English */
+const workerMode = () => ["login", "waiting", "worker", "error"].includes(S.mode);
+const isRTL = () => workerMode() && langOf(S.lang).dir === "rtl";
+const bd = x => isRTL() ? "\u2068" + x + "\u2069" : String(x);
+function T(k, v = {}) { const L = workerMode() ? (TEXT[S.lang] || TEXT.en) : TEXT.en; const s = L[k] ?? TEXT.en[k] ?? k; return String(s).replace(/\{(\w+)\}/g, (_, n) => v[n] == null ? "" : bd(v[n])); }
+const D = x => `<span class="ltr">${x}</span>`;
+const langOf = c => LANGS.find(l => l.code === c) || LANGS[0];
 const MON = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 const DOW = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
 
@@ -113,12 +121,12 @@ function adjTotal(w) { const from = iso(leaveYear(w).s); return (w?.adj || []).f
 function totalLeave(w) { return Math.max(0, entitlement(w) + carried(w) + adjTotal(w)); }
 function leaveLeft(w, reqs) { const y = leaveYear(w); return Math.max(0, totalLeave(w) - usedIn(reqs, w.id, "Annual leave", y.s, y.e)); }
 function sickUsed(w, reqs) { const y = leaveYear(w); return usedIn(reqs, w.id, "Sick leave", y.s, y.e); }
-const stTag = s => `<span class="tag ${s === "Approved" || s === "Sent" ? "ok" : s === "Rejected" || s === "Declined" ? "bad" : "warn"}">${s === "Sent" ? "Ready in Documents" : esc(s)}</span>`;
-const reqTitle = r => r.type === "Document" ? "Document · " + r.doc : r.type === "Loan" ? "Loan · " + aed(r.amount) : r.type === "Fine installment" ? "Fine installments · " + aed(r.amount) + " over " + r.months + " months" : r.type + " · " + fd(r.from) + (r.to !== r.from ? "–" + fd(r.to) : "");
+const stTag = s => `<span class="tag ${s === "Approved" || s === "Sent" ? "ok" : s === "Rejected" || s === "Declined" ? "bad" : "warn"}">${s === "Sent" ? esc(T("Ready in Documents")) : esc(T(s))}</span>`;
+const reqTitle = r => r.type === "Document" ? T("document") + " · " + T(r.doc) : r.type === "Loan" ? T("Loan") + " · " + bd(aed(r.amount)) : r.type === "Fine installment" ? T("instTitle", { amt: aed(r.amount), m: r.months }) : T(r.type) + " · " + bd(fd(r.from) + (r.to !== r.from ? " – " + fd(r.to) : ""));
 
 /* ---------- state ---------- */
 const S = { mode: "loading", user: null, unsubs: [], err: "", sheet: null, dlg: null, arm: null, info: "",
-  dir: [], sites: [], link: null,
+  dir: [], sites: [], link: null, lang: (() => { try { return localStorage.getItem("byld-lang") || ""; } catch (_) { return ""; } })(),
   me: null, att: null, reqs: [], loans: [], msgs: [], notices: [], seen: [], docs: [],
   wtab: "home", punch: null,
   tab: "today", workers: [], links: [], todayAtt: [], allSeen: [], compMode: "one", ts: null, tsMonth: dubaiDate().slice(0, 7), cars: [], fines: [], pay: {}, otMonths: {}, otAdj: {}, otSet: { method: "30", round: 15 }, otAtt: null, ot: { wid: "", month: dubaiDate().slice(0, 7) }, holidays: [], leaveMode: "working", tickets: [], myCars: [], services: [], petrol: [], petPaid: [], pet: { month: dubaiDate().slice(0, 7) } };
@@ -201,7 +209,7 @@ onAuthStateChanged(auth, async user => {
   watch(doc(db, "links", user.uid), s => {
     const had = S.link;
     S.link = s.exists() ? { id: s.id, ...s.data() } : null;
-    if (!S.link) { if (had) S.info = "The office reset this phone. Log in again."; startLogin(); }
+    if (!S.link) { if (had) S.info = "phoneReset"; startLogin(); }
     else if (S.link.status === "approved") { if (S.mode !== "worker") startWorker(S.link.wid); }
     else { S.mode = "waiting"; render(); }
   });
@@ -277,11 +285,11 @@ const setLS = (k, v) => { try { v == null ? localStorage.removeItem(k) : localSt
 const msOf = t => tsDate(t)?.getTime() || 0;
 function workerUpdates() {
   const out = [];
-  S.reqs.filter(r => r.status !== "Pending" && r.decidedAt).forEach(r => { const label = r.type === "Document" ? r.doc : r.type; out.push({ key: "r" + r.id + r.status, at: msOf(r.decidedAt), t: r.status === "Sent" ? label + " is ready" : label + " " + r.status.toLowerCase(), x: r.status === "Sent" ? "Open Documents to see it." : reqTitle(r) }); });
-  S.fines.forEach(f => out.push({ key: "f" + f.id, at: msOf(f.createdAt), t: "New car fine: " + f.type, x: aed(f.amount) + " on " + fd(f.date) + " · " + f.plate }));
-  S.docs.filter(d => !d.requestId).forEach(d => out.push({ key: "d" + d.id, at: msOf(d.createdAt), t: "New document: " + d.name, x: "Added by the office" }));
-  S.msgs.forEach(m => out.push({ key: "m" + m.id, at: msOf(m.createdAt), t: "Message: " + m.title, x: m.text.slice(0, 80) }));
-  S.notices.forEach(n => out.push({ key: "n" + n.id, at: msOf(n.createdAt), t: "General notice: " + n.title, x: n.text.slice(0, 80) }));
+  S.reqs.filter(r => r.status !== "Pending" && r.decidedAt).forEach(r => { const label = r.type === "Document" ? T(r.doc) : T(r.type); out.push({ key: "r" + r.id + r.status, at: msOf(r.decidedAt), t: r.status === "Sent" ? T("isReady", { x: label }) : T({ Approved: "wasApproved", Rejected: "wasRejected", Declined: "wasDeclined" }[r.status] || "wasApproved", { x: label }), x: r.status === "Sent" ? T("openDocs") : reqTitle(r) }); });
+  S.fines.forEach(f => out.push({ key: "f" + f.id, at: msOf(f.createdAt), t: T("newFine", { x: T(f.type) }), x: aed(f.amount) + " · " + fd(f.date) + " · " + f.plate }));
+  S.docs.filter(d => !d.requestId).forEach(d => out.push({ key: "d" + d.id, at: msOf(d.createdAt), t: T("newDoc", { x: d.name }), x: T("addedByOffice") }));
+  S.msgs.forEach(m => out.push({ key: "m" + m.id, at: msOf(m.createdAt), t: T("msgX", { x: m.title }), x: m.text.slice(0, 80) }));
+  S.notices.forEach(n => out.push({ key: "n" + n.id, at: msOf(n.createdAt), t: T("noticeX", { x: n.title }), x: n.text.slice(0, 80) }));
   return out.sort((a, b) => b.at - a.at).slice(0, 20);
 }
 const seenKey = () => "byld-seen-" + (S.mode === "admin" ? "admin" : S.wid);
@@ -299,13 +307,14 @@ function adminPending() {
 function draw() {
   const root = $("root");
   document.body.className = S.mode === "worker" || S.mode === "waiting" || S.mode === "login" ? "app-worker" : "";
+  const lg = workerMode() ? langOf(S.lang) : LANGS[0]; document.documentElement.lang = lg.code; document.documentElement.dir = lg.dir;
   const keep = captureForm();
   if (S.mode === "loading") root.innerHTML = `<div class="center"><div class="spin" role="status" aria-label="Loading"></div></div>`;
-  else if (S.mode === "error") root.innerHTML = `<div class="wrap"><div class="center">${LOGO}<h2>No connection</h2><p>${esc(S.info)}</p></div></div>`;
+  else if (S.mode === "error") root.innerHTML = `<div class="wrap"><div class="center">${LOGO}<h2>${esc(T("noConn"))}</h2></div></div>`;
   else if (S.mode === "login") root.innerHTML = loginHTML();
   else if (S.mode === "adminLogin") root.innerHTML = adminLoginHTML();
   else if (S.mode === "notadmin") root.innerHTML = `<div class="wrap"><div class="center">${LOGO}<h2>Not an admin account</h2><p>${esc(auth.currentUser?.email || "")} can't open the office view.</p><button class="btn" data-a="logout">Log out</button></div></div>`;
-  else if (S.mode === "waiting") root.innerHTML = `<div class="wrap"><div class="center">${LOGO}<h2>Waiting for the office</h2><p>You asked to use this phone as <b>${esc(S.link?.name)}</b>, ${esc(S.link?.position)}. The office needs to approve it once. This page opens by itself when they do.</p><div class="spin" aria-hidden="true"></div></div></div>`;
+  else if (S.mode === "waiting") root.innerHTML = `<div class="wrap"><div class="center">${LOGO}<h2>${esc(T("waitTitle"))}</h2><p>${T("waitText", { name: "<b>" + esc(S.link?.name) + "</b>", pos: esc(S.link?.position) })}</p><div class="spin" aria-hidden="true"></div><button class="langbtn" data-a="w-lang">🌐 ${esc(langOf(S.lang).name)}</button></div>${S.sheet === "lang" ? sheetHTML() : ""}</div>`;
   else if (S.mode === "worker") root.innerHTML = `<div class="wrap">${workerHTML()}</div>`;
   else if (S.mode === "admin") root.innerHTML = `<div class="wrap">${adminTop()}${adminHTML()}</div>`;
   restoreForm(keep); afterDraw();
@@ -325,17 +334,23 @@ function afterDraw() {
 }
 
 /* ---------- login screens ---------- */
+function langPickHTML() {
+  return `<div class="langs">${LANGS.map(l => `<button data-lang="${l.code}" class="${S.lang === l.code ? "on" : ""}" lang="${l.code}" dir="${l.dir}"><span>${esc(l.name)}</span>${l.sub ? `<small>${esc(l.sub)}</small>` : ""}</button>`).join("")}</div>`;
+}
 function loginHTML() {
+  if (!S.lang) return `<div class="wrap"><div class="center">${LOGO}<h2>Choose your language</h2><p>اپنی زبان منتخب کریں · अपनी भाषा चुनें · আপনার ভাষা বেছে নিন · اختر لغتك</p>${langPickHTML()}</div></div>`;
   const positions = [...new Set(S.dir.map(d => d.position).filter(Boolean))].sort();
   return `<div class="wrap"><div class="center">${LOGO}
-    <h2>Welcome</h2><p>Type your name and choose your position. The office will approve this phone once.</p>
-    ${S.info ? `<div class="note">${esc(S.info)}</div>` : ""}
-    <label class="f" for="lg-name">Your full name<input id="lg-name" list="lg-names" autocomplete="name" placeholder="Mohammed Rafiq"></label>
+    <button class="langbtn" data-a="w-lang" style="align-self:flex-end">🌐 ${esc(langOf(S.lang).name)}</button>
+    <h2>${esc(T("welcome"))}</h2><p>${esc(T("loginIntro"))}</p>
+    ${S.info ? `<div class="note">${esc(T(S.info))}</div>` : ""}
+    <label class="f" for="lg-name">${esc(T("yourName"))}<input id="lg-name" list="lg-names" autocomplete="name" placeholder="Mohammed Rafiq" dir="ltr"></label>
     <datalist id="lg-names">${S.dir.map(d => `<option value="${esc(d.name)}">`).join("")}</datalist>
-    <label class="f" for="lg-pos">Your position<select id="lg-pos"><option value="">Choose</option>${positions.map(p => `<option>${esc(p)}</option>`).join("")}</select></label>
+    <label class="f" for="lg-pos">${esc(T("yourPos"))}<select id="lg-pos"><option value="">${esc(T("choose"))}</option>${positions.map(p => `<option>${esc(p)}</option>`).join("")}</select></label>
     ${S.err ? `<div class="err">${esc(S.err)}</div>` : ""}
-    <button class="btn pri" data-a="login">Continue</button>
-    <button class="link" data-a="to-admin">Office login</button></div></div>`;
+    <button class="btn pri" data-a="login">${esc(T("cont"))}</button>
+    <button class="link" data-a="to-admin">${esc(T("officeLogin"))}</button></div>
+    ${S.sheet === "lang" ? sheetHTML() : ""}</div>`;
 }
 function adminLoginHTML() {
   return `<div class="wrap"><div class="center">${LOGO}<h2>Office login</h2><p>For ${CFG.admins.map(esc).join(", ")}.</p>
@@ -349,143 +364,147 @@ function adminLoginHTML() {
 /* ---------- worker screens ---------- */
 function workerHTML() {
   const w = S.me;
-  if (!w) return `<div class="center">${LOGO}<h2>Account not found</h2><p>Your account was removed. Ask the office.</p></div>`;
+  if (!w) return `<div class="center">${LOGO}<h2>${esc(T("goneTitle"))}</h2><p>${esc(T("goneText"))}</p></div>`;
   const a = S.att, site = siteOf(w), now = new Date(), y = leaveYear(w);
   const unreadMsg = S.msgs.filter(m => !m.readAt).length + S.notices.filter(n => !S.seen.includes(n.id)).length;
   const loanBal = S.loans.reduce((s, l) => s + (l.amount || 0) - loanPaid(l), 0);
-  const fresh = S.reqs.filter(r => r.status !== "Pending" && !r.seenByWorker).length + S.docs.filter(d => !d.openedAt).length;
   let main = "";
   if (S.wtab === "home") {
     const tin = tsDate(a?.in?.at), tout = tsDate(a?.out?.at);
-    const status = tout ? `Timed in ${dubaiHM(tin)} · out ${dubaiHM(tout)}` : tin ? `Timed in at ${dubaiHM(tin)}` : "Not timed in yet";
-    const mine = S.reqs.slice().sort((x, z) => (tsDate(z.createdAt) || 0) - (tsDate(x.createdAt) || 0)).slice(0, 6);
+    const status = tout ? T("inOut", { a: dubaiHM(tin), b: dubaiHM(tout) }) : tin ? T("inAt", { a: dubaiHM(tin) }) : T("notIn");
+    const mine = S.reqs.slice().sort((x, z) => (tsDate(z.createdAt) || 0) - (tsDate(x.createdAt) || 0));
+    const pendN = mine.filter(r => r.status === "Pending").length;
     const ln = S.notices[0];
-    main = `${ln ? `<button class="notice ${S.seen.includes(ln.id) ? "" : "fresh"}" data-notice="${ln.id}"><span class="nl">General notice${S.seen.includes(ln.id) ? "" : " · new"}</span><b>${esc(ln.title)}</b><span class="nx">${esc(ln.text.length > 90 ? ln.text.slice(0, 90) + "…" : ln.text)}</span></button>` : ""}
-    <div class="clock"><div class="d">${DOW[now.getDay()]} ${now.getDate()} ${MON[now.getMonth()]} · ${esc(site?.name || "No site set")}</div><div class="t" id="clk">${dubaiHM(now)}</div><div class="st">${status}</div>
-     <div class="punch"><button class="pbtn in" data-a="punch-in" aria-disabled="${!!a?.in}"><span>Time in</span><small>Selfie and location</small></button>
-     <button class="pbtn out" data-a="punch-out" aria-disabled="${!a?.in || !!a?.out}"><span>Time out</span><small>Selfie and location</small></button></div></div>
-    ${S.myCars.map(c => { const si = svcInfo(c); return si.k === "over" || si.k === "soon" ? `<div class="notice fresh" style="cursor:default;${si.k === "over" ? "border-color:var(--bad);background:var(--bad-bg)" : ""}"><span class="nl" style="${si.k === "over" ? "color:var(--bad)" : ""}">Car service · ${si.k === "over" ? "overdue" : "due soon"}</span><b>${esc(c.model || "")} ${esc(c.plate)}</b><span class="nx">Service ${esc(si.why)}. Book it with the office. After the service, tap "I serviced the car" below.</span></div>` : ""; }).join("")}
-    ${unreadMsg ? `<button class="act" data-wtab="msgs" style="background:var(--warn-bg);border-color:transparent"><span class="ic">✉</span>You have ${unreadMsg} unread message${unreadMsg > 1 ? "s or notices" : " or notice"}<span class="ar">›</span></button>` : ""}
-    <div class="tiles"><div class="tile"><small>Annual leave left</small><strong>${leaveLeft(w, S.reqs)}</strong> <small style="display:inline">of ${totalLeave(w)}</small></div>
-     <div class="tile"><small>Sick days this year</small><strong>${sickUsed(w, S.reqs)}</strong></div>
-     <div class="tile"><small>Loan balance</small><strong style="font-size:15px">${aed(loanBal)}</strong></div></div>
-    <div class="lyear">${w.joined ? `Your leave year: <b>${fdy(y.s)} to ${fdy(y.e)}</b>. It starts again on your work anniversary.` : "The office hasn't entered your joining date yet."}</div>
+    main = `${ln ? `<button class="notice ${S.seen.includes(ln.id) ? "" : "fresh"}" data-notice="${ln.id}"><span class="nl">${esc(T("genNotice"))}${S.seen.includes(ln.id) ? "" : " · " + esc(T("isNew"))}</span><b>${esc(ln.title)}</b><span class="nx">${esc(ln.text.length > 90 ? ln.text.slice(0, 90) + "…" : ln.text)}</span></button>` : ""}
+    <div class="clock"><div class="d">${D(DOW[now.getDay()] + " " + now.getDate() + " " + MON[now.getMonth()])} · ${esc(site?.name || T("noSite"))}</div><div class="t" id="clk">${dubaiHM(now)}</div><div class="st">${esc(status)}</div>
+     <div class="punch"><button class="pbtn in" data-a="punch-in" aria-disabled="${!!a?.in}"><span>${esc(T("timeIn"))}</span><small>${esc(T("selfieLoc"))}</small></button>
+     <button class="pbtn out" data-a="punch-out" aria-disabled="${!a?.in || !!a?.out}"><span>${esc(T("timeOut"))}</span><small>${esc(T("selfieLoc"))}</small></button></div></div>
+    ${S.myCars.map(c => { const si = svcInfo(c); return si.k === "over" || si.k === "soon" ? `<div class="notice fresh" style="cursor:default;${si.k === "over" ? "border-color:var(--bad);background:var(--bad-bg)" : ""}"><span class="nl" style="${si.k === "over" ? "color:var(--bad)" : ""}">${esc(T("carSvc"))} · ${esc(T(si.k === "over" ? "svcOver" : "svcSoon"))}</span><b>${esc(c.model || "")} <span class="num">${esc(c.plate)}</span></b><span class="nx">${esc(T(si.k === "over" ? "svcOverText" : "svcSoonText", { d: fdy(si.last.next) }))}</span></div>` : ""; }).join("")}
+    ${unreadMsg ? `<button class="act" data-wtab="msgs" style="background:var(--warn-bg);border-color:transparent"><span class="ic">✉</span>${esc(T("unread", { n: unreadMsg }))}<span class="ar">›</span></button>` : ""}
+    <div class="tiles"><div class="tile"><small>${esc(T("leaveLeft"))}</small><strong>${leaveLeft(w, S.reqs)}</strong> <small style="display:inline">${esc(T("ofN", { n: totalLeave(w) }))}</small></div>
+     <div class="tile"><small>${esc(T("sickDays"))}</small><strong>${sickUsed(w, S.reqs)}</strong></div>
+     <div class="tile"><small>${esc(T("loanBal"))}</small><strong style="font-size:15px">${D(aed(loanBal))}</strong></div></div>
+    <div class="lyear">${w.joined ? T("leaveYear", { a: "<b>" + fdy(y.s), b: fdy(y.e) + "</b>" }) : esc(T("noJoined"))}</div>
     <div class="actions">
-     <button class="act" data-a="s-annual"><span class="ic">✈</span>Apply for annual leave<span class="ar">›</span></button>
-     <button class="act" data-a="s-sick"><span class="ic">✚</span>Apply for sick leave<span class="ar">›</span></button>
-     <button class="act" data-a="s-absent"><span class="ic">◷</span>Request to be absent<span class="ar">›</span></button>
-     <button class="act" data-a="s-loan"><span class="ic">◈</span>Request a loan<span class="ar">›</span></button>
-     <button class="act" data-a="s-docreq"><span class="ic">▤</span>Request a document<span class="ar">›</span></button></div>
+     <button class="act" data-a="s-annual"><span class="ic">✈</span>${esc(T("applyAnnual"))}<span class="ar">›</span></button>
+     <button class="act" data-a="s-sick"><span class="ic">✚</span>${esc(T("applySick"))}<span class="ar">›</span></button>
+     <button class="act" data-a="s-absent"><span class="ic">◷</span>${esc(T("reqAbsent"))}<span class="ar">›</span></button>
+     <button class="act" data-a="s-loan"><span class="ic">◈</span>${esc(T("reqLoan"))}<span class="ar">›</span></button>
+     <button class="act" data-a="s-docreq"><span class="ic">▤</span>${esc(T("reqDoc"))}<span class="ar">›</span></button></div>
     ${myFinesHTML()}
     ${myCarHTML()}
     ${myPetrolHTML()}
-    <div class="hist"><h4>My requests</h4>${mine.length ? mine.map(r => `<div class="hrow"><span>${esc(reqTitle(r))}</span>${stTag(r.status)}</div>`).join("") : `<p class="lock">No requests yet.</p>`}
-    <p class="lock">Requests can't be edited or deleted once sent. Ask the office if something needs changing.</p></div>`;
+    <details class="hist reqs" ${S.reqsOpen === false ? "" : "open"}><summary><h4>${esc(T("myReqs"))} · ${mine.length}${pendN ? " · " + pendN + " " + esc(T("Pending")) : ""}</h4><span class="chev" aria-hidden="true">▾</span></summary>
+    ${mine.length ? `<div class="reqlist">${mine.map(r => `<div class="hrow"><span>${esc(reqTitle(r))}</span>${stTag(r.status)}</div>`).join("")}</div>` : `<p class="lock">${esc(T("noReqs"))}</p>`}
+    <p class="lock">${esc(T("reqLock"))}</p></details>`;
   } else if (S.wtab === "msgs") {
-    main = `<div class="sec-h"><h2>Messages</h2></div><div class="sub-h">General notices</div>
-    <div class="list">${S.notices.length ? S.notices.map(n => `<button class="r msg ${S.seen.includes(n.id) ? "" : "unread"}" data-notice="${n.id}"><div class="main"><div class="t">${S.seen.includes(n.id) ? "" : '<span class="ndot"></span>'}${esc(n.title)}</div><div class="s">${esc(n.text.slice(0, 70))}${n.text.length > 70 ? "…" : ""}</div></div><span class="s">${esc(when(n.createdAt))}</span></button>`).join("") : `<div class="r"><div class="main s">No notices.</div></div>`}</div>
-    <div class="sub-h">Personal messages · only you can see these</div>
-    <div class="list">${S.msgs.length ? S.msgs.map(m => `<button class="r msg ${m.readAt ? "" : "unread"}" data-msg="${m.id}"><div class="main"><div class="t">${m.readAt ? "" : '<span class="ndot"></span>'}${esc(m.title)}</div><div class="s">${esc(m.text.slice(0, 70))}${m.text.length > 70 ? "…" : ""}</div></div><span class="s">${esc(when(m.createdAt))}</span></button>`).join("") : `<div class="r"><div class="main s">No messages yet.</div></div>`}</div>`;
+    main = `<div class="sec-h"><h2>${esc(T("messages"))}</h2></div><div class="sub-h">${esc(T("notices"))}</div>
+    <div class="list">${S.notices.length ? S.notices.map(n => `<button class="r msg ${S.seen.includes(n.id) ? "" : "unread"}" data-notice="${n.id}"><div class="main"><div class="t">${S.seen.includes(n.id) ? "" : '<span class="ndot"></span>'}${esc(n.title)}</div><div class="s">${esc(n.text.slice(0, 70))}${n.text.length > 70 ? "…" : ""}</div></div><span class="s">${D(esc(when(n.createdAt)))}</span></button>`).join("") : `<div class="r"><div class="main s">${esc(T("noNotices"))}</div></div>`}</div>
+    <div class="sub-h">${esc(T("personal"))}</div>
+    <div class="list">${S.msgs.length ? S.msgs.map(m => `<button class="r msg ${m.readAt ? "" : "unread"}" data-msg="${m.id}"><div class="main"><div class="t">${m.readAt ? "" : '<span class="ndot"></span>'}${esc(m.title)}</div><div class="s">${esc(m.text.slice(0, 70))}${m.text.length > 70 ? "…" : ""}</div></div><span class="s">${D(esc(when(m.createdAt)))}</span></button>`).join("") : `<div class="r"><div class="main s">${esc(T("noMsgs"))}</div></div>`}</div>`;
   } else {
     const pend = S.reqs.filter(r => r.type === "Document" && r.status === "Pending");
-    main = `<div class="sec-h"><h2>Documents</h2><button class="btn pri sm" data-a="s-docreq">Request a document</button></div>
-    ${pend.length ? `<div class="list">${pend.map(r => `<div class="r"><div class="main"><div class="t">${esc(r.doc)}</div><div class="s">Requested · the office will upload it here</div></div>${stTag("Pending")}</div>`).join("")}</div>` : ""}
-    <div class="list">${S.docs.length ? S.docs.map(x => `<div class="r"><div class="thumb">${esc((x.fileName || "").split(".").pop().slice(0, 4).toUpperCase() || "DOC")}</div><div class="main"><div class="t">${esc(x.name)}</div><div class="s">${esc(x.fileName)} · ${esc(when(x.createdAt))}</div></div><button class="btn sm" data-open="${x.id}">Open</button></div>`).join("") : `<div class="r"><div class="main s">No documents yet.</div></div>`}</div>
-    <p class="lock">Documents are added by the office. You can open and save them, but not change or delete them.</p>`;
+    main = `<div class="sec-h"><h2>${esc(T("documents"))}</h2><button class="btn pri sm" data-a="s-docreq">${esc(T("reqDoc"))}</button></div>
+    ${pend.length ? `<div class="list">${pend.map(r => `<div class="r"><div class="main"><div class="t">${esc(T(r.doc))}</div><div class="s">${esc(T("docRequested"))}</div></div>${stTag("Pending")}</div>`).join("")}</div>` : ""}
+    <div class="list">${S.docs.length ? S.docs.map(x => `<div class="r"><div class="thumb">${esc((x.fileName || "").split(".").pop().slice(0, 4).toUpperCase() || "DOC")}</div><div class="main"><div class="t">${esc(x.name)}</div><div class="s">${esc(x.fileName)} · ${esc(when(x.createdAt))}</div></div><button class="btn sm" data-open="${x.id}">${esc(T("open"))}</button></div>`).join("") : `<div class="r"><div class="main s">${esc(T("noDocs"))}</div></div>`}</div>
+    <p class="lock">${esc(T("docLock"))}</p>`;
   }
   return `<div class="phone-stage"><div class="phone">
-   <div class="ph-top">${LOGO}<button class="bell" data-a="s-notes" aria-label="Updates${unseenCount() ? ", " + unseenCount() + " new" : ""}">${BELL}${unseenCount() ? `<span class="dot">${unseenCount()}</span>` : ""}</button></div>
+   <div class="ph-top">${LOGO}<div class="tools"><button class="langbtn" data-a="w-lang" aria-label="${esc(T("language"))}">🌐 ${esc(langOf(S.lang).name)}</button><button class="bell" data-a="s-notes" aria-label="${esc(T("updates"))}${unseenCount() ? ", " + unseenCount() : ""}">${BELL}${unseenCount() ? `<span class="dot">${unseenCount()}</span>` : ""}</button></div></div>
    <div class="me"><div class="av">${esc(initials(w.name))}</div><div><b>${esc(w.name)}</b><span>${esc(w.position)} · <span class="num">${esc(w.id)}</span></span></div></div>
    ${main}
    <nav class="wnav" aria-label="App sections">
-    <button class="${S.wtab === "home" ? "on" : ""}" data-wtab="home"><span>⌂</span>Home</button>
-    <button class="${S.wtab === "msgs" ? "on" : ""}" data-wtab="msgs"><span>✉${unreadMsg ? `<i>${unreadMsg}</i>` : ""}</span>Messages</button>
-    <button class="${S.wtab === "docs" ? "on" : ""}" data-wtab="docs"><span>▤</span>Documents</button></nav>
+    <button class="${S.wtab === "home" ? "on" : ""}" data-wtab="home"><span>⌂</span>${esc(T("home"))}</button>
+    <button class="${S.wtab === "msgs" ? "on" : ""}" data-wtab="msgs"><span>✉${unreadMsg ? `<i>${unreadMsg}</i>` : ""}</span>${esc(T("messages"))}</button>
+    <button class="${S.wtab === "docs" ? "on" : ""}" data-wtab="docs"><span>▤</span>${esc(T("documents"))}</button></nav>
    ${S.sheet ? sheetHTML() : ""}</div></div>`;
 }
 function myCarHTML() {
   if (!S.myCars.length) return "";
-  return `<div class="hist"><h4>My car</h4>${S.myCars.map(c => { const si = svcInfo(c); return `<div class="fine-card"><div class="hrow" style="border:0;padding:0"><span><b>${esc(c.model || "Car")}</b> · <span class="num">${esc(c.plate)}</span></span><span class="tag ${si.k === "over" ? "bad" : si.k === "soon" ? "warn" : si.k === "ok" ? "ok" : ""}">${si.short}</span></div>
-   <div class="hrow"><span>Last service</span><span>${si.last ? fdy(si.last.date) : "–"}</span></div><div class="hrow"><span>Next service</span><span><b>${si.last?.next ? fdy(si.last.next) : "–"}</b></span></div>
-   <div class="row-btns"><button class="btn sm pri" data-svcme="${c.id}">I serviced the car</button></div></div>`; }).join("")}</div>`;
+  return `<div class="hist"><h4>${esc(T("myCar"))}</h4>${S.myCars.map(c => { const si = svcInfo(c); return `<div class="fine-card"><div class="hrow" style="border:0;padding:0"><span><b>${esc(c.model || "")}</b> · <span class="num">${esc(c.plate)}</span></span><span class="tag ${si.k === "over" ? "bad" : si.k === "soon" ? "warn" : si.k === "ok" ? "ok" : ""}">${esc(T({ over: "svcOverTag", soon: "svcSoonTag", ok: "svcOK" }[si.k] || "svcNone"))}</span></div>
+   <div class="hrow"><span>${esc(T("lastSvc"))}</span><span>${si.last ? D(fdy(si.last.date)) : "–"}</span></div><div class="hrow"><span>${esc(T("nextSvc"))}</span><span><b>${si.last?.next ? D(fdy(si.last.next)) : "–"}</b></span></div>
+   <div class="row-btns"><button class="btn sm pri" data-svcme="${c.id}">${esc(T("svcTitle"))}</button></div></div>`; }).join("")}</div>`;
 }
 function myPetrolHTML() {
   const ms = petMonths(); if (!ms.length) return "";
   const owe = ms.reduce((t, m) => petPaidOf(S.wid, m) ? t : t + S.petrol.filter(x => x.month === m).reduce((a, x) => a + (+x.amount || 0), 0), 0);
-  return `<div class="hist"><h4>Weekend petrol · ${owe ? aed2(owe) + " to pay" : "all paid"}</h4><p class="lock" style="margin:0 0 8px">Petrol used on weekends and days off is paid by the driver. The office enters it from the fuel card.</p>${ms.map((m, i) => { const rows = S.petrol.filter(x => x.month === m && x.amount > 0).sort((a, b) => a.date.localeCompare(b.date)), tot = rows.reduce((a, x) => a + (+x.amount || 0), 0), pp = petPaidOf(S.wid, m); if (!tot) return ""; return `<details class="fine-card" ${i === 0 ? "open" : ""}><summary class="hrow" style="border:0;padding:0;cursor:pointer;list-style:none"><span><b>${fmtMonth(m)}</b> · ${aed2(tot)}</span>${pp ? `<span class="tag ok">Paid ${fd(pp.date)}</span>` : '<span class="tag bad">To pay</span>'}</summary>
+  return `<div class="hist"><h4>${esc(T("petrol"))} · ${owe ? esc(T("toPay", { x: aed2(owe) })) : esc(T("allPaid"))}</h4><p class="lock" style="margin:0 0 8px">${esc(T("petrolHint"))}</p>${ms.map((m, i) => { const rows = S.petrol.filter(x => x.month === m && x.amount > 0).sort((a, b) => a.date.localeCompare(b.date)), tot = rows.reduce((a, x) => a + (+x.amount || 0), 0), pp = petPaidOf(S.wid, m); if (!tot) return ""; return `<details class="fine-card" ${i === 0 ? "open" : ""}><summary class="hrow" style="border:0;padding:0;cursor:pointer;list-style:none"><span><b>${D(fmtMonth(m))}</b> · ${D(aed2(tot))}</span>${pp ? `<span class="tag ok">${esc(T("paidOn", { d: fd(pp.date) }))}</span>` : `<span class="tag bad">${esc(T("toPayTag"))}</span>`}</summary>
   <div class="s" style="margin-top:4px">${[...new Set(rows.map(x => (x.model ? x.model + " " : "") + x.plate))].map(esc).join(", ")}</div>
-  ${rows.map(x => `<div class="hrow"><span>${x.kind === "other" ? "Other days" : "Weekend " + wkLabel(x.date)}</span><span class="num">${money2p(x.amount)}</span></div>`).join("")}${pp ? `<div class="s">${esc(pp.how)} on ${fdy(pp.date)}</div>` : ""}</details>`; }).join("")}</div>`;
+  ${rows.map(x => `<div class="hrow"><span>${esc(x.kind === "other" ? T("otherDays") : T("weekendX", { x: (d => d.getDate() + "–" + new Date(d.getFullYear(), d.getMonth(), d.getDate() + 1).getDate() + " " + MON[d.getMonth()])(pd(x.date)) }))}</span><span class="num">${money2p(x.amount)}</span></div>`).join("")}${pp ? `<div class="s">${esc(T("viaOn", { how: T(pp.how), d: fdy(pp.date) }))}</div>` : ""}</details>`; }).join("")}</div>`;
 }
 function myFinesHTML() {
   if (!S.fines.length) return "";
   const tot = S.fines.reduce((t, f) => t + owed(f), 0);
-  return `<div class="hist"><h4>My car fines · ${aed(tot)} still owed</h4>${S.fines.map(f => { const pr = fineReq(f); return `<div class="fine-card">
-   <div class="hrow" style="border:0;padding:0"><span><b>${esc(f.type)}</b> · ${aed(f.amount)}</span>${f.status === "Unpaid" ? '<span class="tag bad">Unpaid</span>' : f.status === "Installments" ? '<span class="tag warn">Installments</span>' : `<span class="tag ok">${esc(f.status)}</span>`}</div>
-   <div class="s">${fd(f.date)}${f.time ? " " + esc(f.time) : ""}${f.place ? " · " + esc(f.place) : ""} · <span class="num">${esc(f.plate)}</span>${f.no ? " · fine no. " + esc(f.no) : ""}</div>
-   ${f.status === "Installments" ? `<div class="calc">${aed(f.monthly)} a month · <b>${aed(f.remaining)} left</b></div>` : ""}
-   <div class="row-btns">${f.fileId ? `<button class="btn sm" data-fineproof="${f.id}">See the fine</button>` : ""}${f.status === "Unpaid" ? (pr ? '<span class="tag warn">Installments requested</span>' : `<button class="btn sm pri" data-reqinst="${f.id}">Request installments</button>`) : ""}</div></div>`; }).join("")}</div>`;
+  return `<div class="hist"><h4>${esc(T("myFines", { x: aed(tot) }))}</h4>${S.fines.map(f => { const pr = fineReq(f); return `<div class="fine-card">
+   <div class="hrow" style="border:0;padding:0"><span><b>${esc(T(f.type))}</b> · ${D(aed(f.amount))}</span><span class="tag ${f.status === "Unpaid" ? "bad" : f.status === "Installments" ? "warn" : "ok"}">${esc(T(f.status))}</span></div>
+   <div class="s">${D(fd(f.date) + (f.time ? " " + esc(f.time) : ""))}${f.place ? " · " + esc(f.place) : ""} · <span class="num">${esc(f.plate)}</span>${f.no ? " · " + esc(T("fineNo")) + " " + esc(f.no) : ""}</div>
+   ${f.status === "Installments" ? `<div class="calc">${esc(T("perMonthLeft", { x: aed(f.monthly), y: aed(f.remaining) }))}</div>` : ""}
+   <div class="row-btns">${f.fileId ? `<button class="btn sm" data-fineproof="${f.id}">${esc(T("seeFine"))}</button>` : ""}${f.status === "Unpaid" ? (pr ? `<span class="tag warn">${esc(T("instRequested"))}</span>` : `<button class="btn sm pri" data-reqinst="${f.id}">${esc(T("reqInst"))}</button>`) : ""}</div></div>`; }).join("")}</div>`;
 }
+const trLink = text => S.lang && S.lang !== "en" ? `<a class="btn grow" href="https://translate.google.com/?sl=auto&tl=${S.lang}&text=${encodeURIComponent(text)}&op=translate" target="_blank" rel="noopener">🌐 ${esc(T("translate"))}</a>` : "";
 function sheetHTML() {
   const sh = S.sheet, w = S.me; let body = "";
   const errLine = S.err ? `<div class="err">${esc(S.err)}</div>` : "";
-  if (sh === "notes") {
+  if (sh === "lang") {
+    body = `<h3>${esc(T("pickLang"))}</h3>${langPickHTML()}<p class="hint">${esc(T("pickHint"))}</p><div class="row-btns"><button class="btn grow" data-a="close">${esc(T("close"))}</button></div>`;
+  } else if (sh === "notes") {
     const since = +S.notesSince || 0, list = workerUpdates();
-    body = `<h3>Updates</h3>
-    <div class="list">${list.length ? list.map(u => `<div class="r"><div class="main"><div class="t">${u.at > since ? '<span class="ndot"></span>' : ""}${esc(u.t)}</div><div class="s">${esc(u.x)}</div></div><span class="s">${esc(when(new Date(u.at)))}</span></div>`).join("") : `<div class="r"><div class="main s">Nothing yet. Approvals, messages, notices and documents show up here.</div></div>`}</div>
-    <p class="hint">Open the app to check for updates. The red number on the bell shows what's new since you last looked.</p>
-    <div class="row-btns"><button class="btn grow" data-a="close">Close</button></div>`;
+    body = `<h3>${esc(T("updates"))}</h3>
+    <div class="list">${list.length ? list.map(u => `<div class="r"><div class="main"><div class="t">${u.at > since ? '<span class="ndot"></span>' : ""}${esc(u.t)}</div><div class="s">${esc(u.x)}</div></div><span class="s">${esc(when(new Date(u.at)))}</span></div>`).join("") : `<div class="r"><div class="main s">${esc(T("noUpdates"))}</div></div>`}</div>
+    <p class="hint">${esc(T("updatesHint"))}</p>
+    <div class="row-btns"><button class="btn grow" data-a="close">${esc(T("close"))}</button></div>`;
   } else if (sh === "in" || sh === "out") {
     const P = S.punch || {}, site = siteOf(w);
     const L = P.loc;
-    body = `<h3>${sh === "in" ? "Time in" : "Time out"}</h3>
-    <div class="cam"><div class="shot">${P.photo ? `<img src="${P.photo}" alt="Your photo">` : "No photo yet"}</div>
-     <div style="display:flex;flex-direction:column;gap:6px;min-width:0"><label class="btn sm" for="cam-in" style="text-align:center">${P.photo ? "Retake selfie" : "Take selfie"}</label><input id="cam-in" class="sr" type="file" accept="image/*" capture="user"></div></div>
-    <div class="loc ${L ? (L.dist == null ? "" : L.dist <= (site?.radius || CFG.defaultRadius) ? "ok" : "bad") : ""}">${P.locErr ? esc(P.locErr) : L ? `📍 ${L.dist == null ? "Location found" : fmtDist(L.dist) + " from " + esc(site.name) + (L.dist <= (site.radius || CFG.defaultRadius) ? " · on site" : " · outside site")} (±${Math.round(L.acc)} m)` : "Getting your location…"}</div>
-    ${P.locErr ? `<button class="link" data-a="retry-loc">Try location again</button>` : ""}
+    body = `<h3>${esc(T(sh === "in" ? "timeIn" : "timeOut"))}</h3>
+    <div class="cam"><div class="shot">${P.photo ? `<img src="${P.photo}" alt="">` : esc(T("noPhoto"))}</div>
+     <div style="display:flex;flex-direction:column;gap:6px;min-width:0"><label class="btn sm" for="cam-in" style="text-align:center">${esc(T(P.photo ? "retake" : "takeSelfie"))}</label><input id="cam-in" class="sr" type="file" accept="image/*" capture="user"></div></div>
+    <div class="loc ${L ? (L.dist == null ? "" : L.dist <= (site?.radius || CFG.defaultRadius) ? "ok" : "bad") : ""}">${P.locErr ? esc(T(P.locErr)) : L ? `📍 ${L.dist == null ? esc(T("locFound")) : esc(T("fromSite", { d: fmtDist(L.dist), site: site.name })) + " · " + esc(T(L.dist <= (site.radius || CFG.defaultRadius) ? "onSite" : "offSite"))} (±${Math.round(L.acc)} m)` : esc(T("gettingLoc"))}</div>
+    ${P.locErr ? `<button class="link" data-a="retry-loc">${esc(T("retryLoc"))}</button>` : ""}
     ${errLine}
-    <div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="confirm-punch" ${P.busy ? "disabled" : ""}>${P.busy ? "Saving…" : "Confirm " + (sh === "in" ? "time in" : "time out")}</button></div>`;
+    <div class="row-btns"><button class="btn grow" data-a="close">${esc(T("cancel"))}</button><button class="btn pri grow" data-a="confirm-punch" ${P.busy ? "disabled" : ""}>${esc(T(P.busy ? "saving" : sh === "in" ? "confirmIn" : "confirmOut"))}</button></div>`;
   } else if (["annual", "sick", "absent"].includes(sh)) {
-    const t = { annual: "Apply for annual leave", sick: "Apply for sick leave", absent: "Request to be absent" }[sh], td = dubaiDate();
-    body = `<h3>${t}</h3>
-    <div class="two"><label class="f" for="r-from">From<input id="r-from" type="date" value="${td}"></label><label class="f" for="r-to">To<input id="r-to" type="date" value="${td}"></label></div>
+    const t = { annual: "applyAnnual", sick: "applySick", absent: "reqAbsent" }[sh], td = dubaiDate();
+    body = `<h3>${esc(T(t))}</h3>
+    <div class="two"><label class="f" for="r-from">${esc(T("from"))}<input id="r-from" type="date" value="${td}"></label><label class="f" for="r-to">${esc(T("to"))}<input id="r-to" type="date" value="${td}"></label></div>
     ${sh === "annual" ? `<div class="calc" id="r-calc"></div>` : ""}
-    ${sh === "sick" ? `<label class="f" for="r-cert">Medical certificate (photo or PDF)<input id="r-cert" type="file" accept="image/*,application/pdf"></label><div class="hint" id="cert-picked">${S.certFile ? "Selected: " + esc(S.certFile.name) : ""}</div>` : ""}
-    <label class="f" for="r-why">Reason<textarea id="r-why" placeholder="${sh === "sick" ? "Fever, saw the clinic" : "Family visit"}"></textarea></label>
-    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="send-leave">Send request</button></div>`;
+    ${sh === "sick" ? `<label class="f" for="r-cert">${esc(T("medCert"))}<input id="r-cert" type="file" accept="image/*,application/pdf"></label><div class="hint" id="cert-picked">${S.certFile ? esc(T("selected", { x: S.certFile.name })) : ""}</div>` : ""}
+    <label class="f" for="r-why">${esc(T("reason"))}<textarea id="r-why" placeholder="${esc(T(sh === "sick" ? "phSick" : "phFamily"))}"></textarea></label>
+    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">${esc(T("cancel"))}</button><button class="btn pri grow" data-a="send-leave">${esc(T("send"))}</button></div>`;
   } else if (sh === "svc") {
     const c = S.myCars.find(x => x.id === S.svcCar);
-    body = `<h3>I serviced the car</h3><p class="hint">${esc(c?.model || "")} ${esc(c?.plate || "")}. The office sees this right away. You can't change it after sending, so check the dates.</p>
-    <div class="two"><label class="f" for="ws-date">Date serviced<input id="ws-date" type="date" value="${dubaiDate()}" max="${dubaiDate()}"></label><label class="f" for="ws-next">Next service date<input id="ws-next" type="date"><span class="hint">Written on the garage sticker or invoice.</span></label></div>
-    <div class="two"><label class="f" for="ws-km">Km reading<input id="ws-km" type="number" min="0" inputmode="numeric" placeholder="Optional"></label><label class="f" for="ws-gar">Garage<input id="ws-gar" placeholder="Optional"></label></div>
-    <label class="f" for="ws-file">Photo of the invoice or sticker (optional)<input id="ws-file" type="file" accept="image/*,application/pdf"></label><div class="hint" id="ws-picked"></div>
-    ${S.err ? `<div class="err">${esc(S.err)}</div>` : ""}
-    <div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="ws-send">Send to office</button></div>`;
+    body = `<h3>${esc(T("svcTitle"))}</h3><p class="hint">${esc(c?.model || "")} <span class="num">${esc(c?.plate || "")}</span>. ${esc(T("svcHint"))}</p>
+    <div class="two"><label class="f" for="ws-date">${esc(T("dateServiced"))}<input id="ws-date" type="date" value="${dubaiDate()}" max="${dubaiDate()}"></label><label class="f" for="ws-next">${esc(T("nextSvc"))}<input id="ws-next" type="date"><span class="hint">${esc(T("stickerHint"))}</span></label></div>
+    <div class="two"><label class="f" for="ws-km">${esc(T("km"))}<input id="ws-km" type="number" min="0" inputmode="numeric" placeholder="${esc(T("optional"))}"></label><label class="f" for="ws-gar">${esc(T("garage"))}<input id="ws-gar" placeholder="${esc(T("optional"))}"></label></div>
+    <label class="f" for="ws-file">${esc(T("invoice"))}<input id="ws-file" type="file" accept="image/*,application/pdf"></label><div class="hint" id="ws-picked"></div>
+    ${errLine}
+    <div class="row-btns"><button class="btn grow" data-a="close">${esc(T("cancel"))}</button><button class="btn pri grow" data-a="ws-send">${esc(T("sendOffice"))}</button></div>`;
   } else if (sh === "loan") {
-    body = `<h3>Request a loan</h3>
-    <div class="two"><label class="f" for="l-amt">Amount (AED)<input id="l-amt" type="number" min="100" step="50" value="1000" inputmode="numeric"></label>
-    <label class="f" for="l-mo">Pay back over<select id="l-mo">${[1, 2, 3, 4, 5, 6, 8, 10, 12].map(m => `<option ${m === 5 ? "selected" : ""} value="${m}">${m} month${m > 1 ? "s" : ""}</option>`).join("")}</select></label></div>
+    body = `<h3>${esc(T("reqLoan"))}</h3>
+    <div class="two"><label class="f" for="l-amt">${esc(T("amount"))}<input id="l-amt" type="number" min="100" step="50" value="1000" inputmode="numeric"></label>
+    <label class="f" for="l-mo">${esc(T("payBack"))}<select id="l-mo">${[1, 2, 3, 4, 5, 6, 8, 10, 12].map(m => `<option ${m === 5 ? "selected" : ""} value="${m}">${esc(m > 1 ? T("months", { n: m }) : T("month1"))}</option>`).join("")}</select></label></div>
     <div class="calc" id="l-calc"></div>
-    <label class="f" for="l-why">Reason<textarea id="l-why" placeholder="Sending money home"></textarea></label>
-    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="send-loan">Send request</button></div>`;
+    <label class="f" for="l-why">${esc(T("reason"))}<textarea id="l-why" placeholder="${esc(T("phLoan"))}"></textarea></label>
+    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">${esc(T("cancel"))}</button><button class="btn pri grow" data-a="send-loan">${esc(T("send"))}</button></div>`;
   } else if (sh.startsWith("inst:")) {
     const f = S.fines.find(x => x.id === sh.slice(5)) || { amount: 0, type: "", date: dubaiDate() };
-    body = `<h3>Request installments</h3><div class="hint">${esc(f.type)} fine of ${aed(f.amount)} on ${fd(f.date)}</div>
-    <label class="f" for="in-mo">Pay it over<select id="in-mo">${[2, 3, 4, 5, 6].map(m => `<option value="${m}" ${m === 3 ? "selected" : ""}>${m} months</option>`).join("")}</select></label>
+    body = `<h3>${esc(T("reqInst"))}</h3><div class="hint">${esc(T("fineOf", { type: T(f.type), amt: aed(f.amount), d: fd(f.date) }))}</div>
+    <label class="f" for="in-mo">${esc(T("payOver"))}<select id="in-mo">${[2, 3, 4, 5, 6].map(m => `<option value="${m}" ${m === 3 ? "selected" : ""}>${esc(T("months", { n: m }))}</option>`).join("")}</select></label>
     <div class="calc" id="in-calc"></div>
-    <label class="f" for="in-why">Reason<textarea id="in-why" placeholder="Can't pay it all this month"></textarea></label>
-    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="send-inst">Send request</button></div>`;
+    <label class="f" for="in-why">${esc(T("reason"))}<textarea id="in-why" placeholder="${esc(T("phInst"))}"></textarea></label>
+    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">${esc(T("cancel"))}</button><button class="btn pri grow" data-a="send-inst">${esc(T("send"))}</button></div>`;
   } else if (sh === "docreq") {
-    body = `<h3>Request a document</h3>
-    <label class="f" for="d-type">Document<select id="d-type">${DOC_TYPES.map(t => `<option>${t}</option>`).join("")}</select></label>
-    <label class="f" for="d-other">If other, which document?<input id="d-other" placeholder="Leave salary letter"></label>
-    <label class="f" for="d-why">What is it for?<textarea id="d-why" placeholder="For opening a bank account"></textarea></label>
-    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="send-doc">Send request</button></div>`;
+    body = `<h3>${esc(T("reqDoc"))}</h3>
+    <label class="f" for="d-type">${esc(T("document"))}<select id="d-type">${DOC_TYPES.map(t => `<option value="${esc(t)}">${esc(T(t))}</option>`).join("")}</select></label>
+    <label class="f" for="d-other">${esc(T("ifOther"))}<input id="d-other" placeholder="${esc(T("phOther"))}"></label>
+    <label class="f" for="d-why">${esc(T("whatFor"))}<textarea id="d-why" placeholder="${esc(T("phWhatFor"))}"></textarea></label>
+    ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">${esc(T("cancel"))}</button><button class="btn pri grow" data-a="send-doc">${esc(T("send"))}</button></div>`;
   } else if (sh.startsWith("notice:")) {
     const n = S.notices.find(x => x.id === sh.slice(7)) || { title: "", text: "" };
-    body = `<span class="tag warn" style="align-self:flex-start">General notice · all workers</span><h3>${esc(n.title)}</h3><div class="hint">From the office · ${esc(when(n.createdAt))}</div><div class="msgbody">${esc(n.text)}</div><div class="row-btns"><button class="btn pri grow" data-a="close">Got it</button></div>`;
+    body = `<span class="tag warn" style="align-self:flex-start">${esc(T("noticeAll"))}</span><h3>${esc(n.title)}</h3><div class="hint">${esc(T("fromOffice"))} · ${D(esc(when(n.createdAt)))}</div><div class="msgbody">${esc(n.text)}</div><div class="row-btns">${trLink(n.title + "\n\n" + n.text)}<button class="btn pri grow" data-a="close">${esc(T("gotIt"))}</button></div>`;
   } else if (sh.startsWith("msg:")) {
     const m = S.msgs.find(x => x.id === sh.slice(4)) || { title: "", text: "" };
-    body = `<h3>${esc(m.title)}</h3><div class="hint">From the office · ${esc(when(m.createdAt))}</div><div class="msgbody">${esc(m.text)}</div><div class="row-btns"><button class="btn pri grow" data-a="close">Got it</button></div>`;
+    body = `<h3>${esc(m.title)}</h3><div class="hint">${esc(T("fromOffice"))} · ${D(esc(when(m.createdAt)))}</div><div class="msgbody">${esc(m.text)}</div><div class="row-btns">${trLink(m.title + "\n\n" + m.text)}<button class="btn pri grow" data-a="close">${esc(T("gotIt"))}</button></div>`;
   }
   return `<div class="scrim" data-a="scrim"><div class="sheet" role="dialog" aria-modal="true">${body}</div></div>`;
 }
@@ -508,23 +527,23 @@ function calcs() {
     }
   }
   const ic = $("in-calc");
-  if (ic && S.sheet?.startsWith("inst:")) { const f = S.fines.find(x => x.id === S.sheet.slice(5)), m = +val("in-mo") || 3; if (f) ic.innerHTML = `About <b>${aed(Math.ceil(f.amount / m))} a month</b> taken from salary for ${m} months. The office decides the final plan.`; }
+  if (ic && S.sheet?.startsWith("inst:")) { const f = S.fines.find(x => x.id === S.sheet.slice(5)), m = +val("in-mo") || 3; if (f) ic.textContent = T("instCalc", { x: aed(Math.ceil(f.amount / m)), m }); }
   const fm = $("fi-match");
   if (fm && S.dlg?.k === "fine") { const c = S.cars.find(x => x.id === val("fi-car")), d = val("fi-date"), w = c && d ? driverOn(c, d) : null; fm.innerHTML = w ? `Goes to <b>${esc(wName(w))}</b> · he had ${esc(c.plate)} on ${fd(d)}` : c ? "Nobody had this car on that date" : "Add a car first"; fm.style.color = w ? "" : "var(--bad)"; }
   const c = $("r-calc");
-  if (c && S.me) { const f = val("r-from"), t = val("r-to"); if (f && t && t >= f) { const n = leaveDays(S.wid, f, t).count, left = leaveLeft(S.me, S.reqs); c.innerHTML = `${leaveText(S.wid, f, t)}<br>You have ${left} left this leave year · <b>${left - n} after this</b>`; c.style.color = left - n < 0 ? "var(--bad)" : ""; } else c.textContent = "Pick the start and end dates"; }
+  if (c && S.me) { const f = val("r-from"), t = val("r-to"); if (f && t && t >= f) { const x = leaveDays(S.wid, f, t), n = x.count, left = leaveLeft(S.me, S.reqs); const not = [x.weekend ? T("lvFirstWk", { x: x.wkDays.length > 1 ? pd(x.wkDays[0]).getDate() + "–" + fd(x.wkDays[x.wkDays.length - 1]) : fd(x.wkDays[0]) }) : "", x.hol.length ? T("lvHol", { x: x.hol.join(", ") }) : ""].filter(Boolean).join(" · "); c.innerHTML = `${esc(T("lvAway", { t: x.total }))} · <b>${esc(T("lvCounted", { n }))}</b>${S.leaveMode !== "calendar" && not ? "<br>" + esc(T("lvNot", { x: not })) : ""}<br>${esc(T("lvLeft", { left, after: left - n }))}`; c.style.color = left - n < 0 ? "var(--bad)" : ""; } else c.textContent = T("pickDates"); }
   const l = $("l-calc");
-  if (l) { const a = +val("l-amt") || 0, m = +val("l-mo") || 1; l.innerHTML = `Deducted from salary: <b>${aed(a / m)} per month</b> for ${m} month${m > 1 ? "s" : ""}`; }
+  if (l) { const a = +val("l-amt") || 0, m = +val("l-mo") || 1; l.textContent = T("loanCalc", { x: aed(a / m), m }); }
 }
 function getLocation() {
   const P = S.punch; if (!P) return;
   P.loc = null; P.locErr = null; render();
-  if (!navigator.geolocation) { P.locErr = "This phone can't share its location."; render(); return; }
+  if (!navigator.geolocation) { P.locErr = "locNo"; render(); return; }
   navigator.geolocation.getCurrentPosition(pos => {
     if (S.punch !== P) return;
     const site = siteOf(S.me), { latitude: lat, longitude: lng, accuracy: acc } = pos.coords;
     P.loc = { lat, lng, acc, dist: site?.lat != null ? distM(lat, lng, site.lat, site.lng) : null }; render();
-  }, e => { if (S.punch !== P) return; P.locErr = e.code === 1 ? "Location is blocked. Allow location for this app in your phone settings, then try again." : "Couldn't get your location. Go outside or near a window and try again."; render(); }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
+  }, e => { if (S.punch !== P) return; P.locErr = e.code === 1 ? "locBlocked" : "locFail"; render(); }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 0 });
 }
 
 /* ---------- admin screens ---------- */
@@ -1109,12 +1128,13 @@ function dlgHTML() {
 function nextId() { const n = S.workers.map(w => +(w.id.match(/(\d+)$/)?.[1] || 0)); return "BYLD-" + String((n.length ? Math.max(...n) : 0) + 1).padStart(3, "0"); }
 
 /* ---------- events ---------- */
+document.addEventListener("toggle", e => { if (e.target.matches?.("details.reqs")) S.reqsOpen = e.target.open; }, true);
 document.addEventListener("input", e => { if (e.target.closest(".sheet,.dlg,.center,#compose")) { calcs(); if (S.err) { S.err = ""; const x = document.querySelector(".err"); if (x) x.remove(); } } });
 document.addEventListener("change", async e => {
   const t = e.target;
-  if (t.id === "cam-in") { const f = t.files[0]; if (!f || !S.punch) return; try { S.punch.photo = await shrinkImage(f, 360); S.err = ""; render(); } catch (_) { toast("Couldn't read that photo. Try again."); } }
+  if (t.id === "cam-in") { const f = t.files[0]; if (!f || !S.punch) return; try { S.punch.photo = await shrinkImage(f, 360); S.err = ""; render(); } catch (_) { toast(T("badPhoto")); } }
   if (t.id === "pt-m" && t.value) { S.pet.month = t.value; render(); return; }
-  if (t.id === "ws-file") { S.svcFile = t.files[0] || null; const h = $("ws-picked"); if (h) h.textContent = S.svcFile ? "Selected: " + S.svcFile.name : ""; return; }
+  if (t.id === "ws-file") { S.svcFile = t.files[0] || null; const h = $("ws-picked"); if (h) h.textContent = S.svcFile ? T("selected", { x: S.svcFile.name }) : ""; return; }
   if (t.dataset?.pcell || t.dataset?.pother) {
     const v = parseFloat(String(t.value).replace(/,/g, "")), amt = v > 0 ? Math.round(v * 100) / 100 : 0;
     let carId, date, id, kind; if (t.dataset.pcell) { [carId, date] = t.dataset.pcell.split("|"); id = petKey(carId, date); kind = "weekend"; } else { carId = t.dataset.pother; date = S.pet.month + "-28"; id = petOtherKey(carId, S.pet.month); kind = "other"; }
@@ -1137,7 +1157,7 @@ document.addEventListener("change", async e => {
   if (t.id === "ot-hol" || t.id === "ot-ram") { try { await setDoc(doc(db, "otMonths", S.ot.month), { hol: val("ot-hol"), ramadan: $("ot-ram").checked }, { merge: true }); } catch (err) { fail(err); } return; }
   if (t.id === "fi-file" && S.dlg) { S.dlg.file = t.files[0] || null; const h = $("fi-picked"); if (h) h.textContent = S.dlg.file ? "Selected: " + S.dlg.file.name : ""; }
   if (t.id === "u-file" && S.dlg) { S.dlg.file = t.files[0] || null; const h = $("u-picked"); if (h) h.textContent = S.dlg.file ? "Selected: " + S.dlg.file.name : ""; }
-  if (t.id === "r-cert") { S.certFile = t.files[0] || null; const h = $("cert-picked"); if (h) h.textContent = S.certFile ? "Selected: " + S.certFile.name : ""; }
+  if (t.id === "r-cert") { S.certFile = t.files[0] || null; const h = $("cert-picked"); if (h) h.textContent = S.certFile ? T("selected", { x: S.certFile.name }) : ""; }
   if (t.id === "c-mode") { S.compMode = t.value; S.err = ""; render(); }
   if (t.id === "ts-month" && t.value) { S.tsMonth = t.value; S.ts = null; render(); }
 });
@@ -1155,6 +1175,7 @@ document.addEventListener("submit", async e => {
 
 document.addEventListener("click", async e => {
   const t = e.target, on = sel => t.closest(sel);
+  const lgb = on("[data-lang]"); if (lgb) { S.lang = lgb.dataset.lang; try { localStorage.setItem("byld-lang", S.lang); } catch (_) {} if (S.sheet === "lang") S.sheet = null; render(); return; }
   const tb = on("[data-tab]"); if (tb) { S.tab = tb.dataset.tab; S.err = ""; S.arm = null; render(); return; }
   const wt = on("[data-wtab]"); if (wt) { S.wtab = wt.dataset.wtab; S.sheet = null; render(); scrollTo(0, 0); return; }
   const mg = on("[data-msg]"); if (mg) { const m = S.msgs.find(x => x.id === mg.dataset.msg); S.sheet = "msg:" + m.id; render(); if (!m.readAt) updateDoc(doc(db, "messages", m.id), { readAt: serverTimestamp() }).catch(console.error); return; }
@@ -1234,6 +1255,7 @@ async function action(a, b, t) {
   switch (a) {
     case "scrim": if (t === b) { S.sheet = null; S.punch = null; render(); } return;
     case "fscrim": if (t === b) { S.dlg = null; render(); } return;
+    case "w-lang": S.sheet = "lang"; S.err = ""; render(); return;
     case "close": S.sheet = null; S.punch = null; S.err = ""; render(); return;
     case "dlg-close": S.dlg = null; S.err = ""; S.arm = null; render(); return;
     case "logout": stopAll(); await signOut(auth); return;
@@ -1249,10 +1271,10 @@ async function action(a, b, t) {
     case "reset-pass": { const em = val("al-email"); if (!em) { S.err = "Type your email first, then tap Forgot password."; render(); return; } try { await sendPasswordResetEmail(auth, em); toast("Password reset email sent"); } catch (_) { toast("Couldn't send the reset email."); } return; }
     case "login": {
       const name = norm(val("lg-name")), pos = norm(val("lg-pos"));
-      if (!name || !pos) { S.err = "Type your name and choose your position."; render(); return; }
+      if (!name || !pos) { S.err = T("errLogin1"); render(); return; }
       const m = S.dir.filter(d => norm(d.name) === name && norm(d.position) === pos);
-      if (!m.length) { S.err = "We couldn't find that name with that position. Check the spelling, or ask the office."; render(); return; }
-      if (m.length > 1) { S.err = "Two workers match. Ask the office to log you in."; render(); return; }
+      if (!m.length) { S.err = T("errLogin2"); render(); return; }
+      if (m.length > 1) { S.err = T("errLogin3"); render(); return; }
       await setDoc(doc(db, "links", auth.currentUser.uid), { wid: m[0].id, name: m[0].name, position: m[0].position, status: "pending", at: serverTimestamp(), ua: navigator.userAgent.slice(0, 160) });
       S.info = ""; emailAdmins("New phone waiting for approval", `${m[0].name} (${m[0].position}) is asking to use a new phone. Approve it in the Workers tab.`);
       return;
@@ -1262,13 +1284,13 @@ async function action(a, b, t) {
     case "a-notes": S.dlg = { k: "notes" }; render(); return;
     case "punch-in": case "punch-out": {
       const k = a === "punch-in" ? "in" : "out";
-      if (b.getAttribute("aria-disabled") === "true") { toast(k === "in" ? "You already timed in today" : "Time in first"); return; }
+      if (b.getAttribute("aria-disabled") === "true") { toast(T(k === "in" ? "alreadyIn" : "inFirst")); return; }
       S.punch = { kind: k }; S.sheet = k; S.err = ""; render(); getLocation(); return;
     }
     case "retry-loc": getLocation(); return;
     case "confirm-punch": {
       const P = S.punch;
-      if (!P.photo) { S.err = "Take a selfie first."; render(); return; }
+      if (!P.photo) { S.err = T("needSelfie"); render(); return; }
       if (!P.loc) { S.err = P.locErr ? "Location is needed to time in. Try location again." : "Still getting your location. Wait a second."; render(); return; }
       P.busy = true; render();
       const id = S.wid + "_" + dubaiDate();
@@ -1277,52 +1299,52 @@ async function action(a, b, t) {
         const rec = { at: serverTimestamp(), lat: +P.loc.lat.toFixed(6), lng: +P.loc.lng.toFixed(6), acc: Math.round(P.loc.acc), photo: true };
         if (P.kind === "in") await setDoc(doc(db, "attendance", id), { wid: S.wid, date: dubaiDate(), siteId: S.me.siteId || "", in: rec });
         else await updateDoc(doc(db, "attendance", id), { out: rec });
-        toast(P.kind === "in" ? "Timed in" : "Timed out"); S.sheet = null; S.punch = null; render();
+        toast(T(P.kind === "in" ? "timedIn" : "timedOut")); S.sheet = null; S.punch = null; render();
       } catch (err) { P.busy = false; render(); fail(err); }
       return;
     }
     case "s-annual": case "s-sick": case "s-absent": case "s-loan": case "s-docreq": S.sheet = a.slice(2); S.err = ""; S.certFile = null; render(); return;
     case "send-leave": {
       const f = val("r-from"), to = val("r-to"), why = val("r-why"), kind = S.sheet;
-      if (!f || !to) { S.err = "Pick both dates."; render(); return; }
-      if (to < f) { S.err = "The end date is before the start date."; render(); return; }
-      if (kind === "annual" && leaveDays(S.wid, f, to).count > leaveLeft(S.me, S.reqs)) { S.err = "That's more days than you have left this leave year."; render(); return; }
-      if (!why) { S.err = "Write a short reason."; render(); return; }
+      if (!f || !to) { S.err = T("pickBoth"); render(); return; }
+      if (to < f) { S.err = T("endBefore"); render(); return; }
+      if (kind === "annual" && leaveDays(S.wid, f, to).count > leaveLeft(S.me, S.reqs)) { S.err = T("tooMany"); render(); return; }
+      if (!why) { S.err = T("needReason"); render(); return; }
       const type = { annual: "Annual leave", sick: "Sick leave", absent: "Absent" }[kind];
       const data = { wid: S.wid, type, from: f, to, days: type === "Annual leave" ? leaveDays(S.wid, f, to).count : days(f, to), reason: why, status: "Pending", createdAt: serverTimestamp() };
       const file = kind === "sick" ? S.certFile : null;
       b.disabled = true; b.textContent = "Sending…";
-      if (file) { if (file.size > 5 * 1024 * 1024) { S.err = "The certificate must be under 5 MB."; b.disabled = false; render(); return; } data.certFileId = await saveFile(file, S.wid, "cert"); }
+      if (file) { if (file.size > 5 * 1024 * 1024) { S.err = T("certBig"); b.disabled = false; render(); return; } data.certFileId = await saveFile(file, S.wid, "cert"); }
       await addDoc(collection(db, "requests"), data);
       emailAdmins(`New ${type.toLowerCase()} request`, `${S.me.name}: ${fd(f)}${to !== f ? " to " + fd(to) : ""} · ${why}`);
-      S.sheet = null; toast("Request sent to the office"); render(); return;
+      S.sheet = null; toast(T("sent")); render(); return;
     }
     case "send-loan": {
       const amt = +val("l-amt"), mo = +val("l-mo"), why = val("l-why");
-      if (!amt || amt < 100) { S.err = "Enter an amount of at least AED 100."; render(); return; }
-      if (!why) { S.err = "Write a short reason."; render(); return; }
+      if (!amt || amt < 100) { S.err = T("loanMin"); render(); return; }
+      if (!why) { S.err = T("needReason"); render(); return; }
       b.disabled = true;
       await addDoc(collection(db, "requests"), { wid: S.wid, type: "Loan", amount: amt, months: mo, reason: why, status: "Pending", createdAt: serverTimestamp() });
       emailAdmins("New loan request", `${S.me.name}: ${aed(amt)} over ${mo} months · ${why}`);
-      S.sheet = null; toast("Loan request sent to the office"); render(); return;
+      S.sheet = null; toast(T("loanSent")); render(); return;
     }
     case "send-inst": {
       const f = S.fines.find(x => x.id === S.sheet.slice(5)), m = +val("in-mo"), why = val("in-why");
       if (!f) { S.sheet = null; render(); return; }
-      if (!why) { S.err = "Write a short reason."; render(); return; }
+      if (!why) { S.err = T("needReason"); render(); return; }
       b.disabled = true;
       await addDoc(collection(db, "requests"), { wid: S.wid, type: "Fine installment", fineId: f.id, amount: f.amount, months: m, reason: why, status: "Pending", createdAt: serverTimestamp() });
       emailAdmins("New fine installment request", `${S.me.name}: ${f.type} fine of ${aed(f.amount)} (${f.plate}) over ${m} months · ${why}`);
-      S.sheet = null; toast("Installment request sent to the office"); render(); return;
+      S.sheet = null; toast(T("instSent")); render(); return;
     }
     case "send-doc": {
       let ty = val("d-type"); const other = val("d-other"), why = val("d-why");
-      if (ty === "Other") { if (!other) { S.err = "Write which document you need."; render(); return; } ty = other; }
-      if (!why) { S.err = "Write what the document is for."; render(); return; }
+      if (ty === "Other") { if (!other) { S.err = T("whichDoc"); render(); return; } ty = other; }
+      if (!why) { S.err = T("docFor"); render(); return; }
       b.disabled = true;
       await addDoc(collection(db, "requests"), { wid: S.wid, type: "Document", doc: ty, reason: why, status: "Pending", createdAt: serverTimestamp() });
       emailAdmins("New document request", `${S.me.name}: ${ty} · ${why}`);
-      S.sheet = null; toast("Document request sent to the office"); render(); return;
+      S.sheet = null; toast(T("docSent")); render(); return;
     }
     /* admin */
     case "clean-photos": {
@@ -1345,14 +1367,14 @@ async function action(a, b, t) {
     }
     case "ws-send": {
       const c = S.myCars.find(x => x.id === S.svcCar), d = val("ws-date"), nx = val("ws-next");
-      if (!d || !nx) { S.err = "Enter the date serviced and the next service date."; render(); return; }
-      if (d > dubaiDate()) { S.err = "The service date can't be in the future."; render(); return; }
-      if (nx <= d) { S.err = "The next service must be after the service date."; render(); return; }
+      if (!d || !nx) { S.err = T("svcErr1"); render(); return; }
+      if (d > dubaiDate()) { S.err = T("svcErr2"); render(); return; }
+      if (nx <= d) { S.err = T("svcErr3"); render(); return; }
       const rec = { carId: c.id, plate: c.plate, model: c.model || "", date: d, next: nx, km: +val("ws-km") || 0, garage: val("ws-gar"), cost: 0, note: "", wid: S.wid, by: S.wid, createdAt: serverTimestamp() };
-      if (S.svcFile) { if (S.svcFile.size > 5 * 1024 * 1024) { S.err = "The photo must be under 5 MB."; render(); return; } b.disabled = true; rec.fileId = await saveFile(S.svcFile, S.wid, "svc"); }
+      if (S.svcFile) { if (S.svcFile.size > 5 * 1024 * 1024) { S.err = T("photoBig"); render(); return; } b.disabled = true; rec.fileId = await saveFile(S.svcFile, S.wid, "svc"); }
       await addDoc(collection(db, "services"), rec);
       emailAdmins("Car serviced", `${S.me.name}: ${c.model || ""} ${c.plate} serviced ${fd(d)} · next ${fdy(nx)}`);
-      S.sheet = null; S.svcFile = null; toast("Sent to the office"); render(); return;
+      S.sheet = null; S.svcFile = null; toast(T("sentOffice")); render(); return;
     }
     case "svc-save": {
       const d = S.dlg, c = S.cars.find(x => x.id === d.id), dt = val("sv-date"), nx = val("sv-next");
@@ -1391,7 +1413,7 @@ async function action(a, b, t) {
     case "save-hol": {
       const all = val("h-all") === "1", wids = [...document.querySelectorAll(".h-w:checked")].map(x => x.value), h = { name: val("h-name"), from: val("h-from"), to: val("h-to"), all, wids: all ? [] : wids };
       if (!h.name || !h.from || !h.to) { S.err = "Enter the name and dates."; render(); return; }
-      if (h.to < h.from) { S.err = "The end date is before the start date."; render(); return; }
+      if (h.to < h.from) { S.err = T("endBefore"); render(); return; }
       if (!all && !wids.length) { S.err = "Tick at least one employee."; render(); return; }
       if (S.dlg.id) await setDoc(doc(db, "holidays", S.dlg.id), h); else await addDoc(collection(db, "holidays"), h);
       toast("Holiday saved"); S.dlg = null; S.err = ""; render(); return;

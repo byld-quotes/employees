@@ -12,7 +12,7 @@
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@500&family=IBM+Plex+Sans:wght@400;500;600;700&family=Noto+Sans+Devanagari:wght@400;600;700&family=Noto+Sans+Bengali:wght@400;600;700&family=Noto+Naskh+Arabic:wght@400;600;700&display=swap">
 <style>
 :root{color-scheme:light}
 html{padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
@@ -25,8 +25,8 @@ img{max-width:100%}
   --bg:#ECF0EF;--panel:#FFFFFF;--soft:#F4F7F6;--fg:#152120;--muted:#5B6B68;--line:#D3DCDA;--chip:#E3EAE8;
   --brand:#10373B;--on-brand:#FFFFFF;--sage:#7F9C97;--sage-soft:#E2EFEC;--sage-ink:#10373B;
   --good:#1D7149;--good-bg:#E1F1E8;--bad:#B42318;--bad-bg:#FDECEA;--warn:#6E4B00;--warn-bg:#FFF3D6;--flag:#E8B44A;
-  --display:"Archivo","Arial Narrow",ui-sans-serif,system-ui,sans-serif;
-  --body:"IBM Plex Sans",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
+  --display:"Archivo","Noto Sans Devanagari","Noto Sans Bengali","Noto Naskh Arabic","Arial Narrow",ui-sans-serif,system-ui,sans-serif;
+  --body:"IBM Plex Sans","Noto Sans Devanagari","Noto Sans Bengali","Noto Naskh Arabic",ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;
   --mono:"IBM Plex Mono",ui-monospace,Menlo,monospace;
 }
 @media (prefers-color-scheme:dark){:root:not([data-theme="light"]){
@@ -201,6 +201,18 @@ a.maplink{font-size:12px;font-weight:700;color:var(--sage-ink)}
 table.pet td{padding:4px 6px}table.pet .pcell{width:84px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;text-align:right;font:inherit;font-variant-numeric:tabular-nums;background:var(--panel);color:var(--fg)}
 table.pet .pcell:focus{outline:2px solid var(--brand);outline-offset:0}table.pet .ptot{background:var(--warn-bg);font-weight:700}table.pet tfoot td{border-top:2px solid var(--brand)}
 details.fine-card summary::-webkit-details-marker{display:none}
+
+/* languages */
+.langs{display:grid;gap:10px;width:100%}.langs button{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:var(--panel);color:var(--fg);font:inherit;font-size:20px;font-weight:700;cursor:pointer;text-align:start}
+.langs button small{font-size:13px;font-weight:500;color:var(--muted)}.langs button.on{border-color:var(--brand);box-shadow:0 0 0 2px var(--brand) inset}
+.langbtn{border:1px solid var(--line);background:var(--panel);color:var(--fg);border-radius:999px;padding:6px 12px;font:inherit;font-size:13px;font-weight:600;cursor:pointer}
+.ph-top .tools{display:flex;gap:8px;align-items:center}
+[dir=rtl] .act .ar{transform:scaleX(-1)}[dir=rtl] .num,[dir=rtl] .ltr{direction:ltr;unicode-bidi:isolate}
+details.reqs>summary{list-style:none;cursor:pointer;display:flex;justify-content:space-between;align-items:center}details.reqs>summary::-webkit-details-marker{display:none}
+details.reqs>summary h4{margin:0}details.reqs>summary .chev{transition:transform .2s;color:var(--muted)}details.reqs[open]>summary .chev{transform:rotate(180deg)}
+.reqlist{max-height:228px;overflow-y:auto;margin-top:6px;overscroll-behavior:contain}
+a.btn{text-decoration:none;display:inline-flex;align-items:center;justify-content:center}
+.msgbody,.notice b,.notice .nx,.msg .t,.msg .s,.sheet h3{unicode-bidi:plaintext}
 
 /* real-app additions */
 .app-worker .phone{border:0;border-radius:0;background:transparent;padding:0;min-height:calc(100vh - 40px);width:min(480px,100%)}
