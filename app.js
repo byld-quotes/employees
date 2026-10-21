@@ -79,6 +79,7 @@ async function saveAssignments(car, asg) {
     const w = driverOn(next, f.date);
     if (w && w !== f.wid) { await updateDoc(doc(db, "fines", f.id), { wid: w }); if (f.fileId) await moveFile(f.fileId, w); }
   }
+  for (const x of S.petrol.filter(x => x.carId === car.id)) { const w = driverOn(next, x.date) || null; if (w !== (x.wid || null)) await updateDoc(doc(db, "petrol", x.id), { wid: w }); }
 }
 async function deleteFile(fileId) {
   if (!fileId) return;
@@ -95,13 +96,15 @@ const addDay = (s, n) => { const d = pd(s); d.setDate(d.getDate() + n); return i
 function holOn(wid, date) { return (S.holidays || []).find(h => h.from <= date && h.to >= date && (h.all || (h.wids || []).includes(wid))); }
 function leaveDays(wid, from, to) {
   let total = 0, count = 0, weekend = 0; const hol = [];
-  for (let d = from; d <= to && total < 400; d = addDay(d, 1)) { total++; if (OFF.includes(pd(d).getDay())) { weekend++; continue; } const h = holOn(wid, d); if (h) { if (!hol.includes(h.name)) hol.push(h.name); continue; } count++; }
+  /* Company rule: only the first weekend inside the leave is free; later weekends count as leave. Holidays are never counted. */
+  let seenWk = false, wkDone = false; const wkDays = [];
+  for (let d = from; d <= to && total < 400; d = addDay(d, 1)) { total++; const h = holOn(wid, d); if (h) { if (!hol.includes(h.name)) hol.push(h.name); continue; } if (OFF.includes(pd(d).getDay())) { if (!wkDone) { seenWk = true; weekend++; wkDays.push(d); continue; } } else if (seenWk) wkDone = true; count++; }
   if (S.leaveMode === "calendar") count = total;
-  return { total, count, weekend, hol };
+  return { total, count, weekend, hol, wkDays };
 }
 function leaveText(wid, from, to, ov) {
   const x = leaveDays(wid, from, to), n = ov ?? x.count;
-  const why = [x.weekend ? `${x.weekend} weekend day${x.weekend > 1 ? "s" : ""}` : "", x.hol.length ? `${x.hol.length} holiday${x.hol.length > 1 ? "s" : ""}: ${x.hol.map(esc).join(", ")}` : ""].filter(Boolean).join(", ");
+  const why = [x.weekend ? `first weekend ${x.wkDays.length > 1 ? pd(x.wkDays[0]).getDate() + "–" + fd(x.wkDays[x.wkDays.length - 1]) : fd(x.wkDays[0])}` : "", x.hol.length ? `${x.hol.length} holiday${x.hol.length > 1 ? "s" : ""}: ${x.hol.map(esc).join(", ")}` : ""].filter(Boolean).join(", ");
   return `${x.total} day${x.total > 1 ? "s" : ""} away · <b>${n} counted as leave</b>${S.leaveMode !== "calendar" && why ? " (not counted: " + why + ")" : ""}${ov != null && ov !== x.count ? " · changed by office" : ""}`;
 }
 function usedIn(reqs, wid, type, s, e) { const S_ = iso(s), E = iso(e); return reqs.filter(r => r.wid === wid && r.type === type && r.status === "Approved" && r.from <= E && r.to >= S_).reduce((t, r) => { const a = r.from < S_ ? S_ : r.from, b = r.to > E ? E : r.to; return t + (type === "Annual leave" ? (r.daysOverride ?? leaveDays(wid, a, b).count) : days(a, b)); }, 0); }
@@ -118,11 +121,57 @@ const S = { mode: "loading", user: null, unsubs: [], err: "", sheet: null, dlg: 
   dir: [], sites: [], link: null,
   me: null, att: null, reqs: [], loans: [], msgs: [], notices: [], seen: [], docs: [],
   wtab: "home", punch: null,
-  tab: "today", workers: [], links: [], todayAtt: [], allSeen: [], compMode: "one", ts: null, tsMonth: dubaiDate().slice(0, 7), cars: [], fines: [], pay: {}, otMonths: {}, otAdj: {}, otSet: { method: "30", round: 15 }, otAtt: null, ot: { wid: "", month: dubaiDate().slice(0, 7) }, holidays: [], leaveMode: "working", tickets: [] };
+  tab: "today", workers: [], links: [], todayAtt: [], allSeen: [], compMode: "one", ts: null, tsMonth: dubaiDate().slice(0, 7), cars: [], fines: [], pay: {}, otMonths: {}, otAdj: {}, otSet: { method: "30", round: 15 }, otAtt: null, ot: { wid: "", month: dubaiDate().slice(0, 7) }, holidays: [], leaveMode: "working", tickets: [], myCars: [], services: [], petrol: [], petPaid: [], pet: { month: dubaiDate().slice(0, 7) } };
 /* ---------- cars and fines ---------- */
 const FINE_TYPES = ["Speeding", "Parking", "Red signal", "Salik", "Lane / overtaking", "Seatbelt", "Mobile phone", "Other"];
 const FINE_ST = ["Unpaid", "Installments", "Paid by company", "Deducted from salary", "Waived"];
 function driverOn(car, date) { let w = null; (car?.asg || []).slice().sort((a, b) => a.from.localeCompare(b.from)).forEach(x => { if (x.from <= date) w = x.wid; }); return w; }
+/* ---------- car servicing: last and next service dates are typed in ---------- */
+const SVC_SOON = 14;
+function svcLatest(car) { const own = (S.services || []).filter(x => x.carId === car.id), all = car.svc ? [car.svc, ...own] : own; return all.filter(x => x?.date).sort((a, b) => b.date.localeCompare(a.date) || (b.next || "").localeCompare(a.next || ""))[0] || null; }
+function svcInfo(car) {
+  const last = svcLatest(car);
+  if (!last) return { k: "none", short: "No service on record", why: "Enter the last service" };
+  if (!last.next) return { k: "none", last, short: "No next date", why: "Next service date not entered" };
+  const n = Math.round((pd(last.next) - todayD()) / 864e5), k = n < 0 ? "over" : n <= SVC_SOON ? "soon" : "ok";
+  const why = k === "over" ? `overdue since ${fdy(last.next)} (${-n} day${n === -1 ? "" : "s"})` : k === "soon" ? `due ${fdy(last.next)} (${n === 0 ? "today" : "in " + n + " day" + (n === 1 ? "" : "s")})` : `next service ${fdy(last.next)}`;
+  return { k, last, n, why, short: k === "over" ? "Service overdue" : k === "soon" ? "Service due soon" : "Service OK" };
+}
+const svcDue = () => S.cars.filter(c => ["over", "soon"].includes(svcInfo(c).k));
+let syncing = false;
+async function syncCars() {
+  if (S.mode !== "admin" || syncing || !S.svcLoaded) return; syncing = true;
+  try {
+    const td = dubaiDate();
+    for (const c of S.cars) {
+      const up = {}, d = driverOn(c, td) || null;
+      if ((c.driver || null) !== d) up.driver = d;
+      const l = (S.services || []).filter(x => x.carId === c.id).sort((a, b) => b.date.localeCompare(a.date) || (b.next || "").localeCompare(a.next || ""))[0];
+      const want = l ? { date: l.date, next: l.next || "", km: l.km || 0 } : null;
+      if (JSON.stringify(c.svc || null) !== JSON.stringify(want)) up.svc = want;
+      if (Object.keys(up).length) await updateDoc(doc(db, "cars", c.id), up);
+    }
+  } catch (_) {} finally { syncing = false; }
+}
+/* ---------- weekend petrol: amount per car per weekend, paid by the driver ---------- */
+function weekendsOf(m) { const [y, mo] = m.split("-").map(Number), out = []; for (let d = 1; d <= new Date(y, mo, 0).getDate(); d++) { const dt = new Date(y, mo - 1, d); if (dt.getDay() === 6) out.push(iso(dt)); } return out; }
+function wkLabel(sat) { const a = pd(sat), b = new Date(a.getFullYear(), a.getMonth(), a.getDate() + 1); return a.getMonth() === b.getMonth() ? `${a.getDate()} to ${b.getDate()}` : `${a.getDate()} ${MON[a.getMonth()]} to ${b.getDate()} ${MON[b.getMonth()]}`; }
+const petKey = (carId, sat) => carId + "_" + sat, petOtherKey = (carId, m) => carId + "_" + m + "_other";
+const petAmt = id => +(S.petrol.find(x => x.id === id)?.amount || 0);
+const petPaidOf = (wid, m) => S.petPaid.find(x => x.wid === wid && x.month === m);
+function petByDriver(m) { const by = {}; S.petrol.filter(x => x.month === m && x.amount > 0).forEach(x => { const k = x.wid || "none"; by[k] = by[k] || { wid: x.wid || null, total: 0, rows: [], cars: new Set() }; by[k].total += +x.amount; by[k].rows.push(x); by[k].cars.add((x.model ? x.model + " " : "") + x.plate); }); return Object.values(by); }
+const petMonths = () => [...new Set(S.petrol.map(x => x.month))].sort().reverse();
+const money2p = n => (+n || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 }), aed2 = n => "AED " + money2p(n);
+function parsePaste(txt) {
+  const ws = weekendsOf(S.pet.month), ok = [], bad = [], norm = x => String(x).replace(/\s/g, "").toUpperCase();
+  txt.split(/\r?\n/).map(l => l.trim()).filter(Boolean).forEach(l => {
+    const cells = l.split(/\t|\s{2,}/).map(x => x.trim()).filter(Boolean), pi = cells.findIndex(x => S.cars.some(c => norm(c.plate) === norm(x)));
+    if (pi < 0) { bad.push(cells[0] || l); return; }
+    const car = S.cars.find(c => norm(c.plate) === norm(cells[pi])), nums = cells.slice(pi + 1).map(x => parseFloat(x.replace(/,/g, ""))).filter(x => !isNaN(x)).slice(0, ws.length);
+    ok.push({ car, nums });
+  });
+  return { ok, bad, ws };
+}
 const owed = f => f.status === "Unpaid" ? f.amount : f.status === "Installments" ? (f.remaining ?? f.amount) : 0;
 const fineReq = f => S.reqs.find(r => r.type === "Fine installment" && r.fineId === f.id && r.status === "Pending");
 function parseDate(t) {
@@ -176,10 +225,13 @@ function startWorker(wid) {
   w(doc(db, "attendance", wid + "_" + dubaiDate()), s => { S.att = s.exists() ? s.data({ serverTimestamps: "estimate" }) : null; render(); });
   w(query(collection(db, "requests"), where("wid", "==", wid)), s => { S.reqs = snapList(s); render(); });
   w(query(collection(db, "loans"), where("wid", "==", wid)), s => { S.loans = snapList(s); render(); });
-  w(query(collection(db, "tickets"), where("wid", "==", wid)), s => { S.tickets = snapList(s); render(); });
   w(query(collection(db, "messages"), where("wid", "==", wid)), s => { const old = S.msgs.length; S.msgs = snapList(s).sort((a, b) => (tsDate(b.createdAt) || 0) - (tsDate(a.createdAt) || 0)); render(); });
   w(query(collection(db, "notices"), orderBy("createdAt", "desc"), limit(30)), s => { S.notices = snapList(s); render(); });
   w(doc(db, "noticeSeen", wid), s => { S.seen = s.exists() ? (s.data().ids || []) : []; render(); });
+  w(query(collection(db, "cars"), where("driver", "==", wid)), s => { S.myCars = snapList(s); render(); });
+  w(query(collection(db, "services"), where("wid", "==", wid)), s => { S.services = snapList(s); render(); });
+  w(query(collection(db, "petrol"), where("wid", "==", wid)), s => { S.petrol = snapList(s); render(); });
+  w(query(collection(db, "petrolPaid"), where("wid", "==", wid)), s => { S.petPaid = snapList(s); render(); });
   w(query(collection(db, "fines"), where("wid", "==", wid)), s => { S.fines = snapList(s).sort((a, b) => b.date.localeCompare(a.date)); render(); });
   w(query(collection(db, "documents"), where("wid", "==", wid)), s => { S.docs = snapList(s).sort((a, b) => (tsDate(b.createdAt) || 0) - (tsDate(a.createdAt) || 0)); render(); });
   if (!getLS(seenKey())) setLS(seenKey(), String(Date.now()));
@@ -207,7 +259,10 @@ function startAdmin() {
   w(doc(db, "public", "leave"), s => { S.leaveMode = s.exists() ? (s.data().mode || "working") : "working"; render(); });
   w(collection(db, "otAdj"), s => { S.otAdj = Object.fromEntries(s.docs.map(d => [d.id, d.data()])); render(); });
   w(doc(db, "settings", "overtime"), s => { if (s.exists()) S.otSet = { ...S.otSet, ...s.data() }; render(); });
-  w(collection(db, "cars"), s => { S.cars = snapList(s).sort((a, b) => (a.plate || "").localeCompare(b.plate || "")); render(); });
+  w(collection(db, "cars"), s => { S.cars = snapList(s).sort((a, b) => (a.plate || "").localeCompare(b.plate || "")); syncCars(); render(); });
+  w(collection(db, "services"), s => { S.services = snapList(s); S.svcLoaded = true; syncCars(); render(); });
+  w(collection(db, "petrol"), s => { S.petrol = snapList(s); render(); });
+  w(collection(db, "petrolPaid"), s => { S.petPaid = snapList(s); render(); });
   w(query(collection(db, "fines"), orderBy("date", "desc"), limit(1000)), s => { S.fines = snapList(s); render(); });
   bannerSince = Date.now();
 }
@@ -225,7 +280,6 @@ function workerUpdates() {
   S.reqs.filter(r => r.status !== "Pending" && r.decidedAt).forEach(r => { const label = r.type === "Document" ? r.doc : r.type; out.push({ key: "r" + r.id + r.status, at: msOf(r.decidedAt), t: r.status === "Sent" ? label + " is ready" : label + " " + r.status.toLowerCase(), x: r.status === "Sent" ? "Open Documents to see it." : reqTitle(r) }); });
   S.fines.forEach(f => out.push({ key: "f" + f.id, at: msOf(f.createdAt), t: "New car fine: " + f.type, x: aed(f.amount) + " on " + fd(f.date) + " · " + f.plate }));
   S.docs.filter(d => !d.requestId).forEach(d => out.push({ key: "d" + d.id, at: msOf(d.createdAt), t: "New document: " + d.name, x: "Added by the office" }));
-  (S.tickets || []).forEach(t => out.push({ key: "t" + t.id, at: msOf(t.createdAt), t: "Air ticket recorded", x: t.route + " · " + fdy(t.date) }));
   S.msgs.forEach(m => out.push({ key: "m" + m.id, at: msOf(m.createdAt), t: "Message: " + m.title, x: m.text.slice(0, 80) }));
   S.notices.forEach(n => out.push({ key: "n" + n.id, at: msOf(n.createdAt), t: "General notice: " + n.title, x: n.text.slice(0, 80) }));
   return out.sort((a, b) => b.at - a.at).slice(0, 20);
@@ -310,12 +364,11 @@ function workerHTML() {
     <div class="clock"><div class="d">${DOW[now.getDay()]} ${now.getDate()} ${MON[now.getMonth()]} · ${esc(site?.name || "No site set")}</div><div class="t" id="clk">${dubaiHM(now)}</div><div class="st">${status}</div>
      <div class="punch"><button class="pbtn in" data-a="punch-in" aria-disabled="${!!a?.in}"><span>Time in</span><small>Selfie and location</small></button>
      <button class="pbtn out" data-a="punch-out" aria-disabled="${!a?.in || !!a?.out}"><span>Time out</span><small>Selfie and location</small></button></div></div>
+    ${S.myCars.map(c => { const si = svcInfo(c); return si.k === "over" || si.k === "soon" ? `<div class="notice fresh" style="cursor:default;${si.k === "over" ? "border-color:var(--bad);background:var(--bad-bg)" : ""}"><span class="nl" style="${si.k === "over" ? "color:var(--bad)" : ""}">Car service · ${si.k === "over" ? "overdue" : "due soon"}</span><b>${esc(c.model || "")} ${esc(c.plate)}</b><span class="nx">Service ${esc(si.why)}. Book it with the office. After the service, tap "I serviced the car" below.</span></div>` : ""; }).join("")}
     ${unreadMsg ? `<button class="act" data-wtab="msgs" style="background:var(--warn-bg);border-color:transparent"><span class="ic">✉</span>You have ${unreadMsg} unread message${unreadMsg > 1 ? "s or notices" : " or notice"}<span class="ar">›</span></button>` : ""}
-    <div class="tiles" style="grid-template-columns:repeat(2,minmax(0,1fr))"><div class="tile"><small>Annual leave left</small><strong>${leaveLeft(w, S.reqs)}</strong> <small style="display:inline">of ${totalLeave(w)}</small></div>
+    <div class="tiles"><div class="tile"><small>Annual leave left</small><strong>${leaveLeft(w, S.reqs)}</strong> <small style="display:inline">of ${totalLeave(w)}</small></div>
      <div class="tile"><small>Sick days this year</small><strong>${sickUsed(w, S.reqs)}</strong></div>
-     <div class="tile"><small>Loan balance</small><strong style="font-size:15px">${aed(loanBal)}</strong></div>
-     <div class="tile"><small>Air ticket this year</small><strong style="font-size:15px;color:${tkStatus(w).k === "ok" ? "var(--good)" : "inherit"}">${tkStatus(w).k === "ok" ? "1 available" : tkStatus(w).k === "used" ? "Used" : "Not yet"}</strong></div></div>
-    <div class="lyear" style="margin-bottom:6px">✈ ${esc(tkStatus(w).long)}</div>
+     <div class="tile"><small>Loan balance</small><strong style="font-size:15px">${aed(loanBal)}</strong></div></div>
     <div class="lyear">${w.joined ? `Your leave year: <b>${fdy(y.s)} to ${fdy(y.e)}</b>. It starts again on your work anniversary.` : "The office hasn't entered your joining date yet."}</div>
     <div class="actions">
      <button class="act" data-a="s-annual"><span class="ic">✈</span>Apply for annual leave<span class="ar">›</span></button>
@@ -324,6 +377,8 @@ function workerHTML() {
      <button class="act" data-a="s-loan"><span class="ic">◈</span>Request a loan<span class="ar">›</span></button>
      <button class="act" data-a="s-docreq"><span class="ic">▤</span>Request a document<span class="ar">›</span></button></div>
     ${myFinesHTML()}
+    ${myCarHTML()}
+    ${myPetrolHTML()}
     <div class="hist"><h4>My requests</h4>${mine.length ? mine.map(r => `<div class="hrow"><span>${esc(reqTitle(r))}</span>${stTag(r.status)}</div>`).join("") : `<p class="lock">No requests yet.</p>`}
     <p class="lock">Requests can't be edited or deleted once sent. Ask the office if something needs changing.</p></div>`;
   } else if (S.wtab === "msgs") {
@@ -347,6 +402,19 @@ function workerHTML() {
     <button class="${S.wtab === "msgs" ? "on" : ""}" data-wtab="msgs"><span>✉${unreadMsg ? `<i>${unreadMsg}</i>` : ""}</span>Messages</button>
     <button class="${S.wtab === "docs" ? "on" : ""}" data-wtab="docs"><span>▤</span>Documents</button></nav>
    ${S.sheet ? sheetHTML() : ""}</div></div>`;
+}
+function myCarHTML() {
+  if (!S.myCars.length) return "";
+  return `<div class="hist"><h4>My car</h4>${S.myCars.map(c => { const si = svcInfo(c); return `<div class="fine-card"><div class="hrow" style="border:0;padding:0"><span><b>${esc(c.model || "Car")}</b> · <span class="num">${esc(c.plate)}</span></span><span class="tag ${si.k === "over" ? "bad" : si.k === "soon" ? "warn" : si.k === "ok" ? "ok" : ""}">${si.short}</span></div>
+   <div class="hrow"><span>Last service</span><span>${si.last ? fdy(si.last.date) : "–"}</span></div><div class="hrow"><span>Next service</span><span><b>${si.last?.next ? fdy(si.last.next) : "–"}</b></span></div>
+   <div class="row-btns"><button class="btn sm pri" data-svcme="${c.id}">I serviced the car</button></div></div>`; }).join("")}</div>`;
+}
+function myPetrolHTML() {
+  const ms = petMonths(); if (!ms.length) return "";
+  const owe = ms.reduce((t, m) => petPaidOf(S.wid, m) ? t : t + S.petrol.filter(x => x.month === m).reduce((a, x) => a + (+x.amount || 0), 0), 0);
+  return `<div class="hist"><h4>Weekend petrol · ${owe ? aed2(owe) + " to pay" : "all paid"}</h4><p class="lock" style="margin:0 0 8px">Petrol used on weekends and days off is paid by the driver. The office enters it from the fuel card.</p>${ms.map((m, i) => { const rows = S.petrol.filter(x => x.month === m && x.amount > 0).sort((a, b) => a.date.localeCompare(b.date)), tot = rows.reduce((a, x) => a + (+x.amount || 0), 0), pp = petPaidOf(S.wid, m); if (!tot) return ""; return `<details class="fine-card" ${i === 0 ? "open" : ""}><summary class="hrow" style="border:0;padding:0;cursor:pointer;list-style:none"><span><b>${fmtMonth(m)}</b> · ${aed2(tot)}</span>${pp ? `<span class="tag ok">Paid ${fd(pp.date)}</span>` : '<span class="tag bad">To pay</span>'}</summary>
+  <div class="s" style="margin-top:4px">${[...new Set(rows.map(x => (x.model ? x.model + " " : "") + x.plate))].map(esc).join(", ")}</div>
+  ${rows.map(x => `<div class="hrow"><span>${x.kind === "other" ? "Other days" : "Weekend " + wkLabel(x.date)}</span><span class="num">${money2p(x.amount)}</span></div>`).join("")}${pp ? `<div class="s">${esc(pp.how)} on ${fdy(pp.date)}</div>` : ""}</details>`; }).join("")}</div>`;
 }
 function myFinesHTML() {
   if (!S.fines.length) return "";
@@ -380,10 +448,18 @@ function sheetHTML() {
     const t = { annual: "Apply for annual leave", sick: "Apply for sick leave", absent: "Request to be absent" }[sh], td = dubaiDate();
     body = `<h3>${t}</h3>
     <div class="two"><label class="f" for="r-from">From<input id="r-from" type="date" value="${td}"></label><label class="f" for="r-to">To<input id="r-to" type="date" value="${td}"></label></div>
-    ${sh === "annual" ? `<div class="calc" id="r-calc"></div>${tkStatus(S.me).k === "ok" ? `<label class="r" style="cursor:pointer;margin:10px 0;border:1px solid var(--line);border-radius:12px"><input type="checkbox" id="r-tk" style="width:auto"><span class="main"><span class="t">I want my yearly air ticket with this leave</span><span class="s" style="display:block">You have 1 ticket this year. The office books it or pays cash.</span></span></label><label class="f" for="r-route" id="r-routew" hidden>Where to<input id="r-route" placeholder="Dubai – Manila – Dubai"></label>` : `<div class="hint" style="margin:8px 0">✈ ${esc(tkStatus(S.me).long)}</div>`}` : ""}
+    ${sh === "annual" ? `<div class="calc" id="r-calc"></div>` : ""}
     ${sh === "sick" ? `<label class="f" for="r-cert">Medical certificate (photo or PDF)<input id="r-cert" type="file" accept="image/*,application/pdf"></label><div class="hint" id="cert-picked">${S.certFile ? "Selected: " + esc(S.certFile.name) : ""}</div>` : ""}
     <label class="f" for="r-why">Reason<textarea id="r-why" placeholder="${sh === "sick" ? "Fever, saw the clinic" : "Family visit"}"></textarea></label>
     ${errLine}<div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="send-leave">Send request</button></div>`;
+  } else if (sh === "svc") {
+    const c = S.myCars.find(x => x.id === S.svcCar);
+    body = `<h3>I serviced the car</h3><p class="hint">${esc(c?.model || "")} ${esc(c?.plate || "")}. The office sees this right away. You can't change it after sending, so check the dates.</p>
+    <div class="two"><label class="f" for="ws-date">Date serviced<input id="ws-date" type="date" value="${dubaiDate()}" max="${dubaiDate()}"></label><label class="f" for="ws-next">Next service date<input id="ws-next" type="date"><span class="hint">Written on the garage sticker or invoice.</span></label></div>
+    <div class="two"><label class="f" for="ws-km">Km reading<input id="ws-km" type="number" min="0" inputmode="numeric" placeholder="Optional"></label><label class="f" for="ws-gar">Garage<input id="ws-gar" placeholder="Optional"></label></div>
+    <label class="f" for="ws-file">Photo of the invoice or sticker (optional)<input id="ws-file" type="file" accept="image/*,application/pdf"></label><div class="hint" id="ws-picked"></div>
+    ${S.err ? `<div class="err">${esc(S.err)}</div>` : ""}
+    <div class="row-btns"><button class="btn grow" data-a="close">Cancel</button><button class="btn pri grow" data-a="ws-send">Send to office</button></div>`;
   } else if (sh === "loan") {
     body = `<h3>Request a loan</h3>
     <div class="two"><label class="f" for="l-amt">Amount (AED)<input id="l-amt" type="number" min="100" step="50" value="1000" inputmode="numeric"></label>
@@ -414,6 +490,8 @@ function sheetHTML() {
   return `<div class="scrim" data-a="scrim"><div class="sheet" role="dialog" aria-modal="true">${body}</div></div>`;
 }
 function calcs() {
+  const ppc = $("pp-calc");
+  if (ppc && S.dlg?.k === "petpaste") { const t = val("pp-text"); if (t.trim()) { const r = parsePaste(t); ppc.innerHTML = (r.ok.length ? r.ok.map(x => `<b>${esc(x.car.model || "")} ${esc(x.car.plate)}</b>: ${x.nums.map(money2p).join(", ")} · total ${money2p(x.nums.reduce((a, b) => a + b, 0))}`).join("<br>") : "No plate numbers matched your cars.") + (r.bad.length ? `<br><span style="color:var(--warn)">Not matched: ${r.bad.map(esc).join(", ")}</span>` : ""); } else ppc.textContent = "Paste the rows to see what will be filled in."; }
   const pc = $("p-calc");
   if (pc && S.dlg?.k === "pay") { const l = S.loans.find(x => x.id === S.dlg.id), am = +val("p-amt") || 0, left = l.amount - loanPaid(l) - am; pc.innerHTML = left < 0 ? `<span style="color:var(--bad)">That's more than what's left.</span>` : left === 0 ? "<b>This pays off the loan.</b>" : `After this payment: <b>${aed(left)} left</b>`; }
   const oc = $("om-calc");
@@ -456,8 +534,8 @@ function adminTop() {
 }
 function adminHTML() {
   const pend = S.reqs.filter(r => r.status === "Pending" && r.type !== "Document").length, dpend = S.reqs.filter(r => r.status === "Pending" && r.type === "Document").length;
-  const T = [["today", "Today"], ["requests", "Requests"], ["messages", "Messages"], ["documents", "Documents"], ["workers", "Workers"], ["loans", "Loans"], ["tickets", "Air tickets"], ["cars", "Cars and fines"], ["overtime", "Overtime"], ["timesheet", "Monthly timesheet"]];
-  const body = { today: aToday, requests: aReqs, messages: aMsgs, documents: aDocs, workers: aWorkers, loans: aLoans, tickets: aTickets, cars: aCars, overtime: aOT, timesheet: aTs }[S.tab]();
+  const T = [["today", "Today"], ["requests", "Requests"], ["messages", "Messages"], ["documents", "Documents"], ["workers", "Workers"], ["loans", "Loans"], ["tickets", "Air tickets"], ["cars", "Cars and fines"], ["petrol", "Weekend petrol"], ["overtime", "Overtime"], ["timesheet", "Monthly timesheet"]];
+  const body = { today: aToday, requests: aReqs, messages: aMsgs, documents: aDocs, workers: aWorkers, loans: aLoans, tickets: aTickets, cars: aCars, petrol: aPetrol, overtime: aOT, timesheet: aTs }[S.tab]();
   return `<div class="board"><div class="tabs" role="tablist">${T.map(([k, l]) => `<button class="tab ${S.tab === k ? "on" : ""}" data-tab="${k}" role="tab" aria-selected="${S.tab === k}">${l}${k === "requests" && pend ? `<span class="n">${pend}</span>` : ""}${k === "documents" && dpend ? `<span class="n">${dpend}</span>` : ""}${k === "workers" && S.links.length ? `<span class="n">${S.links.length}</span>` : ""}</button>`).join("")}</div>${body}</div>${S.dlg ? dlgHTML() : ""}`;
 }
 const armBtn = key => `<button class="btn sm del ${S.arm === key ? "armed" : ""}" data-arm="${key}">${S.arm === key ? "Tap again" : "Delete"}</button>`;
@@ -485,19 +563,19 @@ function aToday() {
   const now = todayD();
   return `<div class="sec-h"><div><h2>${DOW[now.getDay()]} ${now.getDate()} ${MON[now.getMonth()]}</h2><p>Who's in, who isn't, and where they timed in from. Red distance means outside the site radius. Tap a photo to see it bigger.</p></div></div>
   ${S.links.length ? `<button class="notice fresh" data-tab="workers"><span class="nl">Phones waiting for approval</span><b>${S.links.length} new phone login${S.links.length > 1 ? "s" : ""}</b><span class="nx">Open Workers to approve them.</span></button>` : ""}
+  ${svcDue().length ? `<button class="notice fresh" data-tab="cars"><span class="nl">Car service</span><b>${svcDue().length} car${svcDue().length > 1 ? "s" : ""} due for service</b><span class="nx">${svcDue().map(c => esc((c.model ? c.model + " " : "") + c.plate) + " · " + esc(svcInfo(c).why)).join("<br>")}</span></button>` : ""}
   <div class="stats"><div class="stat"><small>Timed in</small><strong>${ins.length}</strong></div><div class="stat ${miss.length && !isOff ? "bad" : ""}"><small>Not in yet</small><strong>${miss.length}</strong></div>
   <div class="stat"><small>On leave</small><strong>${leave.length}</strong></div><div class="stat ${off ? "bad" : ""}"><small>Outside site</small><strong>${off}</strong></div>
   <div class="stat ${pendAll ? "warn" : ""}"><small>Waiting for you</small><strong>${pendAll}</strong></div></div>
   <div class="list">${active.length ? [...miss, ...ins, ...leave].map(row).join("") : `<div class="r"><div class="main s">No workers yet. Add them in the Workers tab.</div></div>`}</div>`;
 }
-function reqLine(r) { const w = wk(r.wid); if (r.type === "Annual leave" && r.from) return `${fd(r.from)} to ${fd(r.to)} ${r.to.slice(0, 4)} · ${leaveText(r.wid, r.from, r.to, r.daysOverride)}${w ? " · " + leaveLeft(w, S.reqs) + " left this leave year" : ""}${r.ticket ? ` · <b>✈ wants air ticket${r.route ? ": " + esc(r.route) : ""}</b>` : ""}`; if (r.type === "Fine installment") { const f = S.fines.find(x => x.id === r.fineId); return `${f ? esc(f.type) + " fine on " + fd(f.date) + " · " + esc(f.plate) + " · " : ""}${aed(r.amount)} over ${r.months} months · about ${aed(Math.ceil(r.amount / r.months))}/month`; } return r.type === "Loan" ? `${aed(r.amount)} over ${r.months} months · ${aed(r.amount / r.months)}/month` : `${fd(r.from)}${r.to !== r.from ? " to " + fd(r.to) : ""} · ${days(r.from, r.to)} day${days(r.from, r.to) > 1 ? "s" : ""}${r.type === "Annual leave" && w ? " · " + leaveLeft(w, S.reqs) + " left this leave year" : ""}`; }
+function reqLine(r) { const w = wk(r.wid); if (r.type === "Annual leave" && r.from) return `${fd(r.from)} to ${fd(r.to)} ${r.to.slice(0, 4)} · ${leaveText(r.wid, r.from, r.to, r.daysOverride)}${w ? " · " + leaveLeft(w, S.reqs) + " left this leave year" : ""}`; if (r.type === "Fine installment") { const f = S.fines.find(x => x.id === r.fineId); return `${f ? esc(f.type) + " fine on " + fd(f.date) + " · " + esc(f.plate) + " · " : ""}${aed(r.amount)} over ${r.months} months · about ${aed(Math.ceil(r.amount / r.months))}/month`; } return r.type === "Loan" ? `${aed(r.amount)} over ${r.months} months · ${aed(r.amount / r.months)}/month` : `${fd(r.from)}${r.to !== r.from ? " to " + fd(r.to) : ""} · ${days(r.from, r.to)} day${days(r.from, r.to) > 1 ? "s" : ""}${r.type === "Annual leave" && w ? " · " + leaveLeft(w, S.reqs) + " left this leave year" : ""}`; }
 function aReqs() {
   const list = S.reqs.filter(r => r.type !== "Document").sort((a, b) => (a.status !== "Pending") - (b.status !== "Pending") || (tsDate(b.createdAt) || 0) - (tsDate(a.createdAt) || 0));
   return `<div class="sec-h"><div><h2>Requests</h2><p>Approving annual leave takes it off that worker's balance for their current leave year. Workers are notified either way.</p></div><button class="btn sm" data-print="requests">Print summary (PDF)</button></div>
   <div class="list">${list.length ? list.map(r => `<div class="r"><div class="main"><div class="t">${esc(wName(r.wid))} · ${esc(r.type)}</div><div class="s">${reqLine(r)}${r.reason ? " · " + esc(r.reason) : ""} · sent ${esc(when(r.createdAt))}</div></div>
    ${r.certFileId ? `<button class="btn sm" data-cert="${r.id}">Certificate</button>` : ""}
    ${r.status === "Pending" ? `<div class="row-btns"><button class="btn sm okb" data-ok="${r.id}">Approve</button><button class="btn sm nob" data-no="${r.id}">Reject</button></div>` : stTag(r.status)}
-   ${r.ticket && r.status === "Approved" && !S.tickets.some(t => t.reqId === r.id) ? `<button class="btn sm okb" data-tkreq="${r.id}">Record ticket</button>` : ""}
    <button class="btn sm" data-edreq="${r.id}">Edit</button></div>`).join("") : `<div class="r"><div class="main s">No requests yet.</div></div>`}</div>`;
 }
 function aMsgs() {
@@ -526,7 +604,7 @@ function aDocs() {
 }
 function aWorkers() {
   const loanBal = id => S.loans.filter(l => l.wid === id).reduce((s, l) => s + (l.amount || 0) - loanPaid(l), 0);
-  return `<div class="sec-h"><div><h2>Holidays and leave counting</h2><p>Annual leave counts ${S.leaveMode !== "calendar" ? "<b>working days only</b>: Saturdays, Sundays and holidays inside a leave are not taken off the balance" : "<b>every calendar day</b> of the leave"}. A holiday can apply to everyone or only to the employees you pick.</p></div><div class="row-btns"><button class="btn sm" data-a="leave-mode">${S.leaveMode !== "calendar" ? "Count calendar days instead" : "Count working days only"}</button><button class="btn pri sm" data-a="hol-add">Add holiday</button></div></div>
+  return `<div class="sec-h"><div><h2>Holidays and leave counting</h2><p>Annual leave counts ${S.leaveMode !== "calendar" ? "<b>working days</b>: holidays and the <b>first</b> Saturday and Sunday inside a leave are not taken off the balance; later weekends count as leave" : "<b>every calendar day</b> of the leave"}. A holiday can apply to everyone or only to the employees you pick.</p></div><div class="row-btns"><button class="btn sm" data-a="leave-mode">${S.leaveMode !== "calendar" ? "Count calendar days instead" : "Skip first weekend and holidays"}</button><button class="btn pri sm" data-a="hol-add">Add holiday</button></div></div>
   <div class="list">${S.holidays.length ? S.holidays.map(h => `<div class="r"><div class="main"><div class="t">${esc(h.name)}</div><div class="s">${fd(h.from)}${h.to !== h.from ? " to " + fd(h.to) : ""} ${h.to.slice(0, 4)} · ${h.all ? "Everyone" : "Only: " + (h.wids || []).map(wName).map(esc).join(", ")}</div></div><button class="btn sm" data-edhol="${h.id}">Edit</button></div>`).join("") : `<div class="r"><div class="main s">No holidays yet. Add public holidays and company holidays here.</div></div>`}</div>
   <div class="sec-h"><div><h2>Workers</h2><p>Workers log in with their name and position. The first time, you approve their phone here. The joining date sets their leave year: 2 days a month after 6 months' service, 30 days a year after the first year.</p></div><button class="btn pri sm" data-a="addw">Add worker</button></div>
   ${S.links.length ? `<div class="sub-h">Phones waiting for approval</div><div class="list">${S.links.map(l => { const w = wk(l.wid); return `<div class="r"><div class="main"><div class="t">${esc(l.name)} · ${esc(l.position)}</div><div class="s">${w ? "Matches " + esc(w.name) + " (" + esc(w.id) + ")" : "No matching worker"}${w?.deviceUid ? " · this replaces their old phone" : ""} · ${esc(when(l.at))}<br>${esc((l.ua || "").slice(0, 90))}</div></div>${w ? `<button class="btn sm okb" data-linkok="${l.id}">Approve phone</button>` : ""}<button class="btn sm nob" data-linkno="${l.id}">Reject</button></div>`; }).join("")}</div>` : ""}
@@ -547,7 +625,10 @@ function aCars() {
   <div class="stats"><div class="stat ${open.length ? "bad" : ""}"><small>Still owed</small><strong>${aed(open.reduce((t, f) => t + owed(f), 0))}</strong></div>
   <div class="stat"><small>On installments</small><strong>${S.fines.filter(f => f.status === "Installments").length}</strong></div>
   <div class="stat"><small>Fines this month</small><strong>${S.fines.filter(f => f.date.startsWith(mon)).length}</strong></div>
-  <div class="stat"><small>Cars</small><strong>${S.cars.length}</strong></div></div>
+  <div class="stat ${svcDue().length ? "warn" : ""}"><small>Due for service</small><strong>${svcDue().length}</strong></div></div>
+  <div class="sec-h" style="margin-top:18px"><div><h2 style="font-size:16px">Servicing</h2><p>Enter when each car was last serviced and when the next service is due. Drivers can also send it from their app after a service. Cars due within ${SVC_SOON} days show here and on Today, and the driver sees a notice in his app.</p></div><button class="btn sm" data-print="service">Print service list (PDF)</button></div>
+  <div class="list">${S.cars.length ? S.cars.slice().sort((a, b) => ({ over: 0, soon: 1, none: 2, ok: 3 }[svcInfo(a).k]) - ({ over: 0, soon: 1, none: 2, ok: 3 }[svcInfo(b).k]) || (svcInfo(a).last?.next || "").localeCompare(svcInfo(b).last?.next || "")).map(c => { const si = svcInfo(c), d = driverOn(c, td), by = si.last?.by && !String(si.last.by).includes("@") ? si.last.by : null; return `<div class="r"><div class="main"><div class="t">${esc(c.model || "Car")} · <span class="num">${esc(c.plate)}</span></div><div class="s">${d ? esc(wName(d)) : "No driver"} · last service ${si.last ? fdy(si.last.date) + (si.last.km ? " at " + Number(si.last.km).toLocaleString() + " km" : "") + (by ? " · sent by " + esc(wName(by)) : "") : "not entered"}</div><div class="s"><b>${esc(si.why)}</b></div></div>
+   <span class="tag ${si.k === "over" ? "bad" : si.k === "soon" ? "warn" : si.k === "ok" ? "ok" : ""}">${si.short}</span><button class="btn sm okb" data-svcadd="${c.id}">Record service</button><button class="btn sm" data-svchist="${c.id}">History</button></div>`; }).join("") : `<div class="r"><div class="main s">Add cars first.</div></div>`}</div>
   <div class="sub-h">Fines</div>
   <div class="list">${sorted.length ? sorted.map(f => { const pr = fineReq(f); return `<div class="r"><div class="main"><div class="t">${esc(f.wid ? wName(f.wid) : "No driver on record")} · ${aed(f.amount)} · ${esc(f.type)}</div><div class="s"><span class="num">${esc(f.plate)}</span> · ${fd(f.date)}${f.time ? " " + esc(f.time) : ""}${f.place ? " · " + esc(f.place) : ""}${f.no ? ` · fine no. <span class="num">${esc(f.no)}</span>` : ""}${f.status === "Installments" ? " · " + aed(f.monthly) + " a month" : ""}</div></div>
    ${pr ? `<button class="tag warn" data-tab="requests" style="border:0;cursor:pointer">Installments requested</button>` : ""}${fineTag(f)}${f.fileId ? `<button class="btn sm" data-fineproof="${f.id}">Proof</button>` : ""}<button class="btn sm" data-edfine="${f.id}">Edit</button></div>`; }).join("") : `<div class="r"><div class="main s">No fines yet.</div></div>`}</div>
@@ -557,12 +638,26 @@ function aCars() {
   <div class="sub-h">Still owed by driver</div>
   <div class="list">${Object.keys(byDriver).length ? Object.entries(byDriver).sort((a, b) => b[1] - a[1]).map(([w, v]) => `<div class="r"><div class="main"><div class="t">${esc(wName(w))}</div><div class="s">${open.filter(f => f.wid === w).length} open fine${open.filter(f => f.wid === w).length > 1 ? "s" : ""}</div></div><span class="tag bad">${aed(v)}</span></div>`).join("") : `<div class="r"><div class="main s">Nothing owed.</div></div>`}</div>`;
 }
+function aPetrol() {
+  const m = S.pet.month, ws = weekendsOf(m), drv = petByDriver(m), total = drv.reduce((t, d) => t + d.total, 0), unpaid = drv.filter(d => d.wid && !petPaidOf(d.wid, m)).reduce((t, d) => t + d.total, 0);
+  const colTot = ws.map(sat => S.cars.reduce((t, c) => t + petAmt(petKey(c.id, sat)), 0)), othTot = S.cars.reduce((t, c) => t + petAmt(petOtherKey(c.id, m)), 0);
+  const drvNames = c => { const ids = [...new Set(ws.concat(m + "-28").map(d => driverOn(c, d)).filter(Boolean))]; return ids.length ? ids.map(wName).map(esc).join(" → ") : '<span style="color:var(--bad)">No driver</span>'; };
+  return `<div class="sec-h"><div><h2>Weekend petrol</h2><p>Petrol used on Saturdays, Sundays and other days off is paid by the driver. Type each car's amount for each weekend. The app charges it to whoever had the car that weekend, adds it up, and shows it in that driver's app.</p></div>
+  <div class="inline-form"><label class="f" for="pt-m">Month<input id="pt-m" type="month" value="${m}"></label><button class="btn sm" data-a="pet-paste">Paste from Excel</button><button class="btn sm" data-print="petrol">Print summary (PDF)</button></div></div>
+  <div class="stats"><div class="stat"><small>${fmtMonth(m)} total</small><strong>${aed2(total)}</strong></div><div class="stat ${unpaid ? "warn" : ""}"><small>Still to collect</small><strong>${aed2(unpaid)}</strong></div><div class="stat"><small>Drivers this month</small><strong>${drv.filter(d => d.wid).length}</strong></div><div class="stat"><small>Weekends</small><strong>${ws.length}</strong></div></div>
+  ${S.cars.length ? `<div class="ts"><table class="pet"><thead><tr><th class="nm">Unit</th><th>Plate no.</th><th>Driver</th>${ws.map(s => `<th class="num">${wkLabel(s)}</th>`).join("")}<th class="num">Other days</th><th class="num">Total</th></tr></thead><tbody>
+  ${S.cars.map(c => { const t = ws.reduce((a, s) => a + petAmt(petKey(c.id, s)), 0) + petAmt(petOtherKey(c.id, m)); return `<tr><td class="nm"><b>${esc(c.model || "")}</b></td><td class="num">${esc(c.plate)}</td><td style="font-size:12px">${drvNames(c)}</td>${ws.map(s => `<td><input class="pcell" data-pcell="${c.id}|${s}" inputmode="decimal" value="${petAmt(petKey(c.id, s)) || ""}" placeholder="0" aria-label="${esc(c.model || "")} ${esc(c.plate)} weekend ${wkLabel(s)}"></td>`).join("")}<td><input class="pcell" data-pother="${c.id}" inputmode="decimal" value="${petAmt(petOtherKey(c.id, m)) || ""}" placeholder="0" aria-label="${esc(c.model || "")} ${esc(c.plate)} other days"></td><td class="num ptot">${money2p(t)}</td></tr>`; }).join("")}
+  </tbody><tfoot><tr><td class="nm" colspan="3"><b>Total</b></td>${colTot.map(x => `<td class="num"><b>${money2p(x)}</b></td>`).join("")}<td class="num"><b>${money2p(othTot)}</b></td><td class="num ptot"><b>${money2p(total)}</b></td></tr></tfoot></table></div>
+  <p class="hint">Click a box and type the amount in AED. It saves when you leave the box. "Other days" is for public holidays or days off that aren't weekends.</p>` : `<div class="list"><div class="r"><div class="main s">Add your cars in Cars and fines first.</div></div></div>`}
+  <div class="sub-h">To pay by driver · ${fmtMonth(m)}</div>
+  <div class="list">${drv.length ? drv.sort((a, b) => b.total - a.total).map(d => { const pp = d.wid && petPaidOf(d.wid, m); return `<div class="r"><div class="thumb">${d.wid ? esc(initials(wName(d.wid))) : "?"}</div><div class="main"><div class="t">${d.wid ? esc(wName(d.wid)) : '<span style="color:var(--bad)">No driver assigned</span>'} · ${aed2(d.total)}</div><div class="s">${[...d.cars].map(esc).join(", ")} · ${d.rows.length} entr${d.rows.length > 1 ? "ies" : "y"}${pp ? ` · ${esc(pp.how)} ${fdy(pp.date)}` : ""}</div></div>
+  ${d.wid ? (pp ? `<span class="tag ok">Paid</span><button class="btn sm" data-petundo="${d.wid}">Undo</button>` : `<span class="tag bad">To pay</span><button class="btn sm okb" data-petpay="${d.wid}">Mark as paid</button>`) : `<button class="btn sm" data-tab="cars">Assign driver</button>`}</div>`; }).join("") : `<div class="r"><div class="main s">Nothing entered for this month yet.</div></div>`}</div>`;
+}
 function aTickets() {
   const ws = S.workers.filter(w => w.active !== false), ys = ws.map(w => ({ w, st: tkStatus(w) })), given = ys.filter(x => x.st.k === "used"), avail = ys.filter(x => x.st.k === "ok");
-  const asked = S.reqs.filter(r => r.ticket && !S.tickets.some(t => t.reqId === r.id) && r.status !== "Rejected"), spent = given.reduce((t, x) => t + (+x.st.t.amount || 0), 0);
-  return `<div class="sec-h"><div><h2>Air tickets</h2><p>One air ticket a year for each employee, counted in the same year as their annual leave: it runs from their work anniversary. First ticket after one year of work. Record each ticket when it's booked or paid in cash.</p></div><div class="row-btns"><button class="btn sm" data-print="tickets">Print summary (PDF)</button><button class="btn pri sm" data-a="tk-new">Record ticket</button></div></div>
-  <div class="stats"><div class="stat"><small>Given this year</small><strong>${given.length}</strong></div><div class="stat"><small>Still available</small><strong>${avail.length}</strong></div><div class="stat"><small>Spent this year</small><strong>${aed(spent)}</strong></div><div class="stat ${asked.length ? "warn" : ""}"><small>Asked with leave</small><strong>${asked.length}</strong></div></div>
-  ${asked.length ? `<div class="sub-h">Asked with annual leave</div><div class="list">${asked.map(r => `<div class="r"><div class="main"><div class="t">${esc(wName(r.wid))} · ${esc(r.route || "")}</div><div class="s">Leave ${fd(r.from)} to ${fd(r.to)} ${r.to.slice(0, 4)} · leave ${esc(r.status.toLowerCase())}</div></div><button class="btn sm okb" data-tkreq="${r.id}">Record ticket</button></div>`).join("")}</div>` : ""}
+  const wait = ys.filter(x => x.st.k === "wait"), spent = given.reduce((t, x) => t + (+x.st.t.amount || 0), 0);
+  return `<div class="sec-h"><div><h2>Air tickets</h2><p>One air ticket a year for each employee, counted in the same year as their annual leave: it runs from their work anniversary. First ticket after one year of work. Record each ticket when it's booked or paid in cash. <b>Only the office sees this</b>; employees don't see tickets in their app.</p></div><div class="row-btns"><button class="btn sm" data-print="tickets">Print summary (PDF)</button><button class="btn pri sm" data-a="tk-new">Record ticket</button></div></div>
+  <div class="stats"><div class="stat"><small>Given this year</small><strong>${given.length}</strong></div><div class="stat"><small>Still available</small><strong>${avail.length}</strong></div><div class="stat"><small>Spent this year</small><strong>${aed(spent)}</strong></div><div class="stat"><small>Not eligible yet</small><strong>${wait.length}</strong></div></div>
   <div class="sub-h">This year, by employee</div>
   <div class="list">${ys.length ? ys.map(({ w, st }) => { const y = leaveYear(w), last = tkLast(w.id); return `<div class="r"><div class="thumb">${esc(initials(w.name))}</div><div class="main"><div class="t">${esc(w.name)}</div><div class="s">${w.joined ? `Ticket year ${fd(y.s)} ${y.s.getFullYear()} – ${fd(y.e)} ${y.e.getFullYear()}` : "No joining date"}${st.k === "used" ? ` · ${esc(st.t.route)} · ${st.t.how === TK_HOW[1] ? "cash" : "ticket"} ${aed(st.t.amount || 0)}` : last ? ` · last one ${fdy(last.date)}` : ""}</div></div>
   <span class="tag ${st.k === "ok" ? "ok" : st.k === "used" ? "br" : "warn"}">${esc(st.short)}</span>${st.k === "used" ? `<button class="btn sm" data-edtk="${st.t.id}">Edit</button>` : st.k === "ok" ? `<button class="btn sm okb" data-tkfor="${w.id}">Record ticket</button>` : ""}</div>`; }).join("") : `<div class="r"><div class="main s">No employees yet.</div></div>`}</div>
@@ -691,6 +786,22 @@ function reportHTML(kind, month) {
     foot = ["", "", "", "", "Total", money2(sum(() => true)), "", money2(ow)];
     const by = {}; list.forEach(f => { by[f.wid] = by[f.wid] || { n: 0, a: 0, o: 0 }; by[f.wid].n++; by[f.wid].a += f.amount; by[f.wid].o += owed(f); });
     if (list.length) extra = `<h3>By driver</h3><table><thead><tr><th>Driver</th><th class="r">Fines</th><th class="r">Total (AED)</th><th class="r">Still owed (AED)</th></tr></thead><tbody>${Object.entries(by).map(([w, v]) => `<tr><td>${esc(wName(w))}</td><td class="r">${v.n}</td><td class="r">${money2(v.a)}</td><td class="r">${money2(v.o)}</td></tr>`).join("")}</tbody></table>`;
+  } else if (kind === "petrol") {
+    const m = month, ws = weekendsOf(m), drv = petByDriver(m), total = drv.reduce((t, d) => t + d.total, 0);
+    title = "Weekend petrol";
+    tiles = [["Cars", S.cars.length], ["Weekends", ws.length], ["Total", "AED " + money2(total)], ["Still to collect", "AED " + money2(drv.filter(d => d.wid && !petPaidOf(d.wid, m)).reduce((t, d) => t + d.total, 0))]];
+    head = ["No.", "Unit", "Plate No.", "Driver", ...ws.map(wkLabel), "Other", "Total"]; num = [0, ...ws.map((_, i) => 4 + i), 4 + ws.length, 5 + ws.length];
+    rows = S.cars.map((c, i) => { const v = ws.map(s => petAmt(petKey(c.id, s))), o = petAmt(petOtherKey(c.id, m)); return [i + 1, c.model || "", c.plate, [...new Set(ws.map(d => driverOn(c, d)).filter(Boolean))].map(wName).join(" / "), ...v.map(money2), money2(o), money2(v.reduce((a, b) => a + b, 0) + o)]; });
+    foot = ["", "", "", "Total", ...ws.map(s => money2(S.cars.reduce((t, c) => t + petAmt(petKey(c.id, s)), 0))), money2(S.cars.reduce((t, c) => t + petAmt(petOtherKey(c.id, m)), 0)), money2(total)];
+    extra = `<h3>To pay by driver</h3><table><thead><tr><th>Driver</th><th>Car</th><th>Status</th><th class="r">Amount (AED)</th></tr></thead><tbody>${drv.map(d => { const p = d.wid && petPaidOf(d.wid, m); return `<tr><td>${esc(d.wid ? wName(d.wid) : "No driver assigned")}</td><td>${[...d.cars].map(esc).join(", ")}</td><td>${p ? esc(p.how) + " " + fdy(p.date) : "To pay"}</td><td class="r">${money2(d.total)}</td></tr>`; }).join("")}</tbody></table>`;
+    note = "Petrol used on Saturdays, Sundays and other days off is outside working hours and is paid by the driver who had the car.";
+  } else if (kind === "service") {
+    title = "Car service list";
+    const list = S.cars.map(c => ({ c, si: svcInfo(c) })), yr = dubaiDate().slice(0, 4), cost = S.services.filter(x => x.date.startsWith(yr)).reduce((a, x) => a + (+x.cost || 0), 0);
+    tiles = [["Cars", S.cars.length], ["Overdue", list.filter(x => x.si.k === "over").length], ["Due in " + SVC_SOON + " days", list.filter(x => x.si.k === "soon").length], ["Service cost " + yr, "AED " + money2(cost)]];
+    head = ["Unit", "Plate No.", "Driver", "Last service", "Next service", "Status"];
+    rows = list.map(({ c, si }) => [c.model || "", c.plate, driverOn(c, dubaiDate()) ? wName(driverOn(c, dubaiDate())) : "", si.last ? fdy(si.last.date) : "", si.last?.next ? fdy(si.last.next) : "", si.short]);
+    extra = `<h3>Services done</h3><table><thead><tr><th>Date</th><th>Car</th><th>Km</th><th>Garage</th><th>What was done</th><th>Next service</th><th class="r">Cost (AED)</th></tr></thead><tbody>${S.services.slice().sort((a, b) => b.date.localeCompare(a.date)).map(x => `<tr><td>${fdy(x.date)}</td><td>${esc((x.model ? x.model + " " : "") + x.plate)}</td><td>${x.km ? Number(x.km).toLocaleString() : ""}</td><td>${esc(x.garage || "")}</td><td>${esc(x.note || "")}</td><td>${x.next ? fdy(x.next) : ""}</td><td class="r">${money2(x.cost)}</td></tr>`).join("")}</tbody></table>`;
   } else if (kind === "tickets") {
     title = "Air tickets summary";
     const ys = S.workers.filter(w => w.active !== false).map(w => ({ w, st: tkStatus(w), y: leaveYear(w) })), spent = ys.filter(x => x.st.k === "used").reduce((t, x) => t + (+x.st.t.amount || 0), 0);
@@ -850,6 +961,29 @@ function dlgHTML() {
     <div class="two"><label class="f" for="a-in">Time in<input id="a-in" type="time" value="${a.in ? dubaiHM(tsDate(a.in.at)) : ""}"></label><label class="f" for="a-out">Time out<input id="a-out" type="time" value="${a.out ? dubaiHM(tsDate(a.out.at)) : ""}"></label></div>
     <p class="hint">Use this when a worker forgot to time in or their phone died. The record is marked "time added by admin".</p>
     ${errLine}<div class="row-btns">${a.in ? delBtn() : ""}<button class="btn grow" data-a="dlg-close">Cancel</button><button class="btn pri grow" data-a="save-att">Save</button></div>`;
+  } else if (d.k === "svcadd") {
+    const c = S.cars.find(x => x.id === d.id), e = d.rec ? S.services.find(x => x.id === d.rec) : { date: dubaiDate(), next: "", km: "", garage: "", cost: "", note: "" };
+    h = `<h3>${d.rec ? "Edit service" : "Record service"} · ${esc(c.model || "")} ${esc(c.plate)}</h3>
+    <div class="two"><label class="f" for="sv-date">Last service date<input id="sv-date" type="date" value="${e.date}"></label><label class="f" for="sv-next">Next service date<input id="sv-next" type="date" value="${e.next || ""}"></label></div>
+    <div class="two"><label class="f" for="sv-km">Km reading<input id="sv-km" type="number" min="0" value="${e.km || ""}" placeholder="Optional"></label><label class="f" for="sv-gar">Garage<input id="sv-gar" value="${esc(e.garage || "")}" placeholder="Al Quoz Auto Care"></label></div>
+    <div class="two"><label class="f" for="sv-cost">Cost (AED)<input id="sv-cost" type="number" min="0" value="${e.cost || ""}"></label><label class="f" for="sv-note">What was done<input id="sv-note" value="${esc(e.note || "")}" placeholder="Oil change, filters"></label></div>
+    ${errLine}<div class="row-btns"><button class="btn grow" data-a="dlg-close">Cancel</button><button class="btn pri grow" data-a="svc-save">Save</button></div>`;
+  } else if (d.k === "svchist") {
+    const c = S.cars.find(x => x.id === d.id), hist = S.services.filter(x => x.carId === c.id).sort((a, b) => b.date.localeCompare(a.date));
+    h = `<h3>Service history · ${esc(c.model || "")} ${esc(c.plate)}</h3>
+    <div class="list">${hist.length ? hist.map(x => `<div class="r"><div class="main"><div class="t">${fdy(x.date)}${x.km ? " · " + Number(x.km).toLocaleString() + " km" : ""}</div><div class="s">Next ${x.next ? fdy(x.next) : "–"}${x.garage ? " · " + esc(x.garage) : ""}${x.cost ? " · " + aed(x.cost) : ""}${x.note ? " · " + esc(x.note) : ""} · ${String(x.by).includes("@") ? "entered by office" : "sent by " + esc(wName(x.by))}</div></div>${x.fileId ? `<button class="btn sm" data-svcfile="${x.id}">Invoice</button>` : ""}<button class="btn sm" data-svcedit="${x.id}">Edit</button><button class="btn sm del ${S.arm === "svc|" + x.id ? "armed" : ""}" data-arm="svc|${x.id}">${S.arm === "svc|" + x.id ? "Tap again" : "Remove"}</button></div>`).join("") : `<div class="r"><div class="main s">No services recorded.</div></div>`}</div>
+    <div class="row-btns"><button class="btn grow" data-a="dlg-close">Close</button><button class="btn pri grow" data-svcadd="${c.id}">Record service</button></div>`;
+  } else if (d.k === "petpay") {
+    const dd = petByDriver(S.pet.month).find(x => x.wid === d.wid);
+    h = `<h3>Mark as paid · ${esc(wName(d.wid))}</h3><p class="hint">Weekend petrol for ${fmtMonth(S.pet.month)}: <b>${aed2(dd?.total || 0)}</b></p>
+    <div class="two"><label class="f" for="pp-date">Date paid<input id="pp-date" type="date" value="${dubaiDate()}"></label><label class="f" for="pp-how">How<select id="pp-how">${["Deducted from salary", "Cash", "Bank transfer"].map(x => `<option>${x}</option>`).join("")}</select></label></div>
+    ${errLine}<div class="row-btns"><button class="btn grow" data-a="dlg-close">Cancel</button><button class="btn pri grow" data-a="pet-paid">Save</button></div>`;
+  } else if (d.k === "petpaste") {
+    const ws = weekendsOf(S.pet.month);
+    h = `<h3>Paste from Excel · ${fmtMonth(S.pet.month)}</h3><p class="hint">In your Excel sheet, select the rows from the plate number to the last weekend (not the total) and copy. Paste here. Each row is matched by plate number. Columns in order: Plate no., ${ws.map(wkLabel).join(", ")}.</p>
+    <label class="f" for="pp-text">Copied rows<textarea id="pp-text" rows="7" placeholder="W/13923&#9;225.91&#9;81.89&#9;268.34&#9;39.6&#9;79.97"></textarea></label>
+    <div class="calc" id="pp-calc">Paste the rows to see what will be filled in.</div>
+    ${errLine}<div class="row-btns"><button class="btn grow" data-a="dlg-close">Cancel</button><button class="btn pri grow" data-a="pet-import">Fill in</button></div>`;
   } else if (d.k === "tk") {
     const r = d.req ? S.reqs.find(x => x.id === d.req) : null, ws = S.workers.filter(w => w.active !== false);
     const t = d.id ? S.tickets.find(x => x.id === d.id) : { wid: r ? r.wid : (d.wid || ws[0]?.id), date: r ? r.from : dubaiDate(), route: r?.route || "", how: TK_HOW[0], amount: "", note: r ? "Annual leave " + fd(r.from) + " to " + fd(r.to) : "" };
@@ -878,7 +1012,7 @@ function dlgHTML() {
     <div class="two"><label class="f" for="o-mo">Months to repay<input id="o-mo" type="number" min="1" value="${l.months}"></label><label class="f" for="o-start">First deduction<input id="o-start" type="month" value="${l.start || dubaiDate().slice(0, 7)}"></label></div>
     <label class="f" for="o-open">Repaid before the app (AED)<input id="o-open" type="number" min="0" value="${d.id ? loanOpening(l) : 0}"><span class="hint">Only for old loans: what he had already paid back before you started using the app.</span></label>
     <label class="f" for="o-note">Note<input id="o-note" value="${esc(l.note || "")}" placeholder="Advance for air ticket"></label>
-    ${d.id ? `<div class="sub-h">Payments · ${aed(paid)} repaid · ${aed(l.amount - paid)} left</div><div class="list">${(loanOpening(l) ? `<div class="r"><div class="main"><div class="t">${aed(loanOpening(l))}</div><div class="s">Repaid before the app</div></div></div>` : "") + ((l.payments || []).length ? l.payments.slice().sort((a, b) => b.date.localeCompare(a.date)).map(p => `<div class="r"><div class="main"><div class="t">${fdy(p.date)} · ${aed(p.amount)}</div><div class="s">${esc(p.method)}${p.note ? " · " + esc(p.note) : ""}</div></div><button class="btn sm del ${S.arm === "pay|" + p.id ? "armed" : ""}" data-arm="pay|${l.id}|${p.id}">${S.arm === "pay|" + l.id + "|" + p.id ? "Tap again" : "Remove"}</button></div>`).join("") : (loanOpening(l) ? "" : `<div class="r"><div class="main s">No payments yet.</div></div>`))}</div>` : ""}
+    ${d.id ? `<div class="sub-h">Payments · ${aed(paid)} repaid · ${aed(l.amount - paid)} left</div><div class="list">${(loanOpening(l) ? `<div class="r"><div class="main"><div class="t">${aed(loanOpening(l))}</div><div class="s">Repaid before the app</div></div></div>` : "") + ((l.payments || []).length ? l.payments.slice().sort((a, b) => b.date.localeCompare(a.date)).map(p => `<div class="r"><div class="main"><div class="t">${fdy(p.date)} · ${aed(p.amount)}</div><div class="s">${esc(p.method)}${p.note ? " · " + esc(p.note) : ""}</div></div><button class="btn sm del ${S.arm === "pay|" + l.id + "|" + p.id ? "armed" : ""}" data-arm="pay|${l.id}|${p.id}">${S.arm === "pay|" + l.id + "|" + p.id ? "Tap again" : "Remove"}</button></div>`).join("") : (loanOpening(l) ? "" : `<div class="r"><div class="main s">No payments yet.</div></div>`))}</div>` : ""}
     ${errLine}<div class="row-btns">${d.id ? delBtn() : ""}<button class="btn grow" data-a="dlg-close">Cancel</button>${d.id && l.amount > paid ? `<button class="btn okb grow" data-addpay="${l.id}">Add payment</button>` : ""}<button class="btn pri grow" data-a="save-loan">${d.id ? "Save" : "Add loan"}</button></div>`;
   } else if (d.k === "pay") {
     const l = S.loans.find(x => x.id === d.id), bal = l.amount - loanPaid(l);
@@ -979,7 +1113,20 @@ document.addEventListener("input", e => { if (e.target.closest(".sheet,.dlg,.cen
 document.addEventListener("change", async e => {
   const t = e.target;
   if (t.id === "cam-in") { const f = t.files[0]; if (!f || !S.punch) return; try { S.punch.photo = await shrinkImage(f, 360); S.err = ""; render(); } catch (_) { toast("Couldn't read that photo. Try again."); } }
-  if (t.id === "r-tk") { const l = $("r-routew"); if (l) l.hidden = !t.checked; return; }
+  if (t.id === "pt-m" && t.value) { S.pet.month = t.value; render(); return; }
+  if (t.id === "ws-file") { S.svcFile = t.files[0] || null; const h = $("ws-picked"); if (h) h.textContent = S.svcFile ? "Selected: " + S.svcFile.name : ""; return; }
+  if (t.dataset?.pcell || t.dataset?.pother) {
+    const v = parseFloat(String(t.value).replace(/,/g, "")), amt = v > 0 ? Math.round(v * 100) / 100 : 0;
+    let carId, date, id, kind; if (t.dataset.pcell) { [carId, date] = t.dataset.pcell.split("|"); id = petKey(carId, date); kind = "weekend"; } else { carId = t.dataset.pother; date = S.pet.month + "-28"; id = petOtherKey(carId, S.pet.month); kind = "other"; }
+    const car = S.cars.find(c => c.id === carId), keep = document.activeElement?.dataset?.pcell || document.activeElement?.dataset?.pother;
+    try {
+      if (amt) await setDoc(doc(db, "petrol", id), { carId, plate: car.plate, model: car.model || "", month: date.slice(0, 7) === S.pet.month ? S.pet.month : date.slice(0, 7), date, kind, amount: amt, wid: driverOn(car, date) || null, by: auth.currentUser.email, at: serverTimestamp() });
+      else if (S.petrol.some(x => x.id === id)) await deleteDoc(doc(db, "petrol", id));
+      toast("Saved");
+    } catch (err) { fail(err); }
+    if (keep) { const n = document.querySelector(`[data-pcell="${keep}"],[data-pother="${keep}"]`); n && n.focus(); }
+    return;
+  }
   if (t.id === "t-w" && S.dlg?.k === "tk") { S.dlg.wid = t.value; render(); return; }
   if (t.id === "h-all") { const l = $("h-list"); if (l) l.hidden = t.value === "1"; return; }
   if (t.id === "om-rate" || t.id === "om-date") { calcs(); return; }
@@ -1019,6 +1166,7 @@ document.addEventListener("click", async e => {
   if (ar) {
     const k = ar.dataset.arm; if (S.arm !== k) { S.arm = k; render(); return; } S.arm = null;
     const [ty, id, extra] = k.split("|");
+    if (ty === "svc") { try { const x = S.services.find(y => y.id === id); if (x?.fileId) { try { await deleteFile(x.fileId); } catch (_) {} } await deleteDoc(doc(db, "services", id)); toast("Service removed"); } catch (err) { fail(err); } return; }
     if (ty === "pay") { try { const l = S.loans.find(x => x.id === id); const payments = (l.payments || []).filter(p => p.id !== extra); await updateDoc(doc(db, "loans", l.id), { payments, opening: loanOpening(l), paid: loanOpening(l) + payments.reduce((t, p) => t + p.amount, 0) }); toast("Payment removed"); } catch (err) { fail(err); } return; }
     if (ty === "asg") { try { const c = S.cars.find(x => x.id === id); await saveAssignments(c, (c.asg || []).filter(x => x.from !== extra)); toast("Assignment removed"); } catch (err) { fail(err); } return; }
     try {
@@ -1053,7 +1201,14 @@ document.addEventListener("click", async e => {
   const es = on("[data-edsite]"); if (es) { S.dlg = { k: "site", id: es.dataset.edsite }; S.arm = null; S.err = ""; render(); return; }
   const er = on("[data-edreq]"); if (er) { S.dlg = { k: "req", id: er.dataset.edreq }; S.arm = null; S.err = ""; render(); return; }
   const ea = on("[data-edatt]"); if (ea) { S.dlg = { k: "att", id: ea.dataset.edatt }; S.arm = null; S.err = ""; render(); return; }
-  const prb = on("[data-print]"); if (prb) { const k = prb.dataset.print; if (k === "loans" || k === "tickets") openReport(k); else if (k === "overtime") openReport("overtime", S.ot.month); else { S.dlg = { k: "print", kind: k }; render(); } return; }
+  const prb = on("[data-print]"); if (prb) { const k = prb.dataset.print; if (k === "loans" || k === "tickets" || k === "service") openReport(k); else if (k === "petrol") openReport("petrol", S.pet.month); else if (k === "overtime") openReport("overtime", S.ot.month); else { S.dlg = { k: "print", kind: k }; render(); } return; }
+  const sa = on("[data-svcadd]"); if (sa) { S.dlg = { k: "svcadd", id: sa.dataset.svcadd }; S.err = ""; render(); return; }
+  const sh_ = on("[data-svchist]"); if (sh_) { S.dlg = { k: "svchist", id: sh_.dataset.svchist }; S.arm = null; render(); return; }
+  const se = on("[data-svcedit]"); if (se) { const x = S.services.find(y => y.id === se.dataset.svcedit); S.dlg = { k: "svcadd", id: x.carId, rec: x.id }; S.err = ""; render(); return; }
+  const sfl = on("[data-svcfile]"); if (sfl) { const x = S.services.find(y => y.id === sfl.dataset.svcfile); try { await openFile(x.fileId, "invoice"); } catch (err) { fail(err); } return; }
+  const sm = on("[data-svcme]"); if (sm) { S.sheet = "svc"; S.svcCar = sm.dataset.svcme; S.svcFile = null; S.err = ""; render(); return; }
+  const ppy = on("[data-petpay]"); if (ppy) { S.dlg = { k: "petpay", wid: ppy.dataset.petpay }; S.err = ""; render(); return; }
+  const pun = on("[data-petundo]"); if (pun) { try { await deleteDoc(doc(db, "petrolPaid", pun.dataset.petundo + "_" + S.pet.month)); toast("Marked as not paid"); } catch (err) { fail(err); } return; }
   const tq = on("[data-tkreq]"); if (tq) { S.dlg = { k: "tk", id: null, req: tq.dataset.tkreq }; S.arm = null; S.err = ""; render(); return; }
   const tf = on("[data-tkfor]"); if (tf) { S.dlg = { k: "tk", id: null, wid: tf.dataset.tkfor }; S.arm = null; S.err = ""; render(); return; }
   const te = on("[data-edtk]"); if (te) { S.dlg = { k: "tk", id: te.dataset.edtk }; S.arm = null; S.err = ""; render(); return; }
@@ -1135,7 +1290,6 @@ async function action(a, b, t) {
       if (!why) { S.err = "Write a short reason."; render(); return; }
       const type = { annual: "Annual leave", sick: "Sick leave", absent: "Absent" }[kind];
       const data = { wid: S.wid, type, from: f, to, days: type === "Annual leave" ? leaveDays(S.wid, f, to).count : days(f, to), reason: why, status: "Pending", createdAt: serverTimestamp() };
-      if (kind === "annual" && $("r-tk")?.checked) { if (!val("r-route")) { S.err = "Write where the ticket is to, like Dubai – Manila – Dubai."; render(); return; } data.ticket = true; data.route = val("r-route"); }
       const file = kind === "sick" ? S.certFile : null;
       b.disabled = true; b.textContent = "Sending…";
       if (file) { if (file.size > 5 * 1024 * 1024) { S.err = "The certificate must be under 5 MB."; b.disabled = false; render(); return; } data.certFileId = await saveFile(file, S.wid, "cert"); }
@@ -1189,6 +1343,38 @@ async function action(a, b, t) {
       await updateDoc(doc(db, "loans", l.id), { payments, opening: loanOpening(l), paid: loanOpening(l) + payments.reduce((t, p) => t + p.amount, 0) });
       toast(am >= bal - 0.001 ? "Loan fully repaid" : aed(am) + " recorded · " + aed(bal - am) + " left"); S.dlg = null; S.err = ""; render(); return;
     }
+    case "ws-send": {
+      const c = S.myCars.find(x => x.id === S.svcCar), d = val("ws-date"), nx = val("ws-next");
+      if (!d || !nx) { S.err = "Enter the date serviced and the next service date."; render(); return; }
+      if (d > dubaiDate()) { S.err = "The service date can't be in the future."; render(); return; }
+      if (nx <= d) { S.err = "The next service must be after the service date."; render(); return; }
+      const rec = { carId: c.id, plate: c.plate, model: c.model || "", date: d, next: nx, km: +val("ws-km") || 0, garage: val("ws-gar"), cost: 0, note: "", wid: S.wid, by: S.wid, createdAt: serverTimestamp() };
+      if (S.svcFile) { if (S.svcFile.size > 5 * 1024 * 1024) { S.err = "The photo must be under 5 MB."; render(); return; } b.disabled = true; rec.fileId = await saveFile(S.svcFile, S.wid, "svc"); }
+      await addDoc(collection(db, "services"), rec);
+      emailAdmins("Car serviced", `${S.me.name}: ${c.model || ""} ${c.plate} serviced ${fd(d)} · next ${fdy(nx)}`);
+      S.sheet = null; S.svcFile = null; toast("Sent to the office"); render(); return;
+    }
+    case "svc-save": {
+      const d = S.dlg, c = S.cars.find(x => x.id === d.id), dt = val("sv-date"), nx = val("sv-next");
+      if (!dt || !nx) { S.err = "Enter the last service date and the next service date."; render(); return; }
+      if (nx <= dt) { S.err = "The next service must be after the last one."; render(); return; }
+      const rec = { date: dt, next: nx, km: +val("sv-km") || 0, garage: val("sv-gar"), cost: +val("sv-cost") || 0, note: val("sv-note") };
+      if (d.rec) await updateDoc(doc(db, "services", d.rec), rec);
+      else await addDoc(collection(db, "services"), { carId: c.id, plate: c.plate, model: c.model || "", ...rec, wid: driverOn(c, dt) || null, by: auth.currentUser.email, createdAt: serverTimestamp() });
+      toast("Saved · next service " + fdy(nx)); S.dlg = null; S.err = ""; render(); return;
+    }
+    case "pet-paste": if (!S.cars.length) { toast("Add cars first"); return; } S.dlg = { k: "petpaste" }; S.err = ""; render(); return;
+    case "pet-import": {
+      const r = parsePaste(val("pp-text")); if (!r.ok.length) { S.err = "No plate numbers matched. Copy the rows including the Plate No. column."; render(); return; }
+      const bt = writeBatch(db);
+      r.ok.forEach(x => x.nums.forEach((n, i) => { const sat = r.ws[i], id = petKey(x.car.id, sat); if (n > 0) bt.set(doc(db, "petrol", id), { carId: x.car.id, plate: x.car.plate, model: x.car.model || "", month: S.pet.month, date: sat, kind: "weekend", amount: Math.round(n * 100) / 100, wid: driverOn(x.car, sat) || null, by: auth.currentUser.email, at: serverTimestamp() }); else if (S.petrol.some(p => p.id === id)) bt.delete(doc(db, "petrol", id)); }));
+      await bt.commit(); toast(r.ok.length + " car" + (r.ok.length > 1 ? "s" : "") + " filled in"); S.dlg = null; S.err = ""; render(); return;
+    }
+    case "pet-paid": {
+      const dd = petByDriver(S.pet.month).find(x => x.wid === S.dlg.wid);
+      await setDoc(doc(db, "petrolPaid", S.dlg.wid + "_" + S.pet.month), { wid: S.dlg.wid, month: S.pet.month, date: val("pp-date"), how: val("pp-how"), amount: dd?.total || 0, by: auth.currentUser.email });
+      toast("Marked as paid"); S.dlg = null; render(); return;
+    }
     case "tk-new": if (!S.workers.length) { toast("Add employees first"); return; } S.dlg = { k: "tk", id: null }; S.err = ""; render(); return;
     case "save-tk": {
       const d = S.dlg, old = d.id ? S.tickets.find(x => x.id === d.id) : null, wid = old ? old.wid : d.req ? S.reqs.find(x => x.id === d.req).wid : val("t-w");
@@ -1201,7 +1387,7 @@ async function action(a, b, t) {
       toast("Air ticket saved for " + wName(wid)); S.dlg = null; S.err = ""; render(); return;
     }
     case "hol-add": S.dlg = { k: "hol", id: null }; S.err = ""; render(); return;
-    case "leave-mode": { const mode = S.leaveMode === "calendar" ? "working" : "calendar"; await setDoc(doc(db, "public", "leave"), { mode }); toast(mode === "working" ? "Leave now counts working days only" : "Leave now counts every calendar day"); return; }
+    case "leave-mode": { const mode = S.leaveMode === "calendar" ? "working" : "calendar"; await setDoc(doc(db, "public", "leave"), { mode }); toast(mode === "working" ? "Leave now skips holidays and the first weekend" : "Leave now counts every calendar day"); return; }
     case "save-hol": {
       const all = val("h-all") === "1", wids = [...document.querySelectorAll(".h-w:checked")].map(x => x.value), h = { name: val("h-name"), from: val("h-from"), to: val("h-to"), all, wids: all ? [] : wids };
       if (!h.name || !h.from || !h.to) { S.err = "Enter the name and dates."; render(); return; }
